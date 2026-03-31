@@ -865,7 +865,7 @@ export function Timeline({
 
   const btnStyle: React.CSSProperties = {
     width: 26,
-    height: 22,
+    height: 20,
     border: "none",
     borderRadius: 2,
     cursor: "pointer",
@@ -887,7 +887,7 @@ export function Timeline({
         style={{
           display: "flex",
           alignItems: "center",
-          height: 30,
+          height: 26,
           padding: "0 6px",
           gap: 4,
           background: C.tabBg,
@@ -912,7 +912,7 @@ export function Timeline({
           style={{
             ...btnStyle,
             width: 30,
-            height: 24,
+            height: 22,
             background: playing ? C.playhead : C.tabActive,
             color: playing ? C.toolbarOnAccent : C.tabText,
             borderRadius: 3,
@@ -932,10 +932,10 @@ export function Timeline({
         </button>
         <div
           style={{
-            padding: "2px 6px",
+            padding: "1px 6px",
             borderRadius: 3,
             background: C.frameBadge,
-            fontSize: 10,
+            fontSize: 9,
             color: C.frameBadgeText,
             margin: "0 2px",
             whiteSpace: "nowrap",
@@ -943,11 +943,11 @@ export function Timeline({
         >
           F{String(Math.round(currentFrame)).padStart(3, "0")} / {fc}
         </div>
-        <div style={{ width: 1, height: 16, background: C.border, margin: "0 2px" }} />
+        <div style={{ width: 1, height: 14, background: C.border, margin: "0 2px" }} />
         {/* Channel tabs */}
         {TABS.map((t) => {
           if (t.sep)
-            return <div key={t.key} style={{ width: 1, height: 16, background: C.border, margin: "0 1px" }} />
+            return <div key={t.key} style={{ width: 1, height: 14, background: C.border, margin: "0 1px" }} />
           const active = tab === t.key
           return (
             <button
@@ -955,7 +955,7 @@ export function Timeline({
               key={t.key}
               onClick={() => setTab(t.key)}
               style={{
-                height: 22,
+                height: 20,
                 padding: "0 6px",
                 border: "none",
                 borderRadius: 3,

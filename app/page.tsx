@@ -16,8 +16,11 @@ import {
 import Link from "next/link"
 import Image from "next/image"
 import { BoneList } from "@/components/bone-list"
+import { MorphList } from "@/components/morph-list"
+import { SelectionInspector } from "@/components/selection-inspector"
 import { Timeline, type SelectedKeyframe } from "@/components/timeline"
 import { BONE_GROUPS } from "@/lib/animation"
+import { interpolationTemplateForFrame, readLocalPoseAfterSeek } from "@/lib/keyframe-insert"
 import type { AnimationClip } from "reze-engine"
 
 const MODEL_PATH = "/models/reze/reze.pmx"
@@ -35,6 +38,10 @@ export default function Home() {
   const frameCount = clip?.frameCount ?? 0
   /** PMX skeleton bone names; used to hide VMD tracks that do not exist on the loaded model. */
   const [pmxBoneNames, setPmxBoneNames] = useState<ReadonlySet<string>>(new Set())
+  /** From `model.getMorphing().morphs` (engine has no `getMorphs()` alias yet). */
+  const [morphNames, setMorphNames] = useState<string[]>([])
+  const [activeMorph, setActiveMorph] = useState<string | null>(null)
+  const [morphWeightReadout, setMorphWeightReadout] = useState<number | null>(null)
 
   const allBones = useMemo(() => {
     if (!clip) return []
@@ -104,15 +111,29 @@ export default function Home() {
   const handleSelectGroup = useCallback((g: string) => {
     setSelectedGroup((prev) => (prev === g ? "" : g))
     setActiveBone(null)
+    setActiveMorph(null)
+    setSelectedKeyframes([])
   }, [])
 
   const handleSelectBone = useCallback((b: string) => {
+    setActiveMorph(null)
     setActiveBone(b)
+    setSelectedKeyframes([])
+  }, [])
+
+  const handleSelectMorph = useCallback((name: string) => {
+    setActiveBone(null)
+    setActiveMorph(name)
+    setSelectedKeyframes([])
   }, [])
 
   useEffect(() => {
     if (activeBone && !allBones.includes(activeBone)) setActiveBone(null)
   }, [activeBone, allBones])
+
+  useEffect(() => {
+    if (activeMorph && !morphNames.includes(activeMorph)) setActiveMorph(null)
+  }, [activeMorph, morphNames])
 
   useEffect(() => {
     setSelectedKeyframes((prev) =>
@@ -149,6 +170,7 @@ export default function Home() {
           if (disposed) return
           modelRef.current = model
           setPmxBoneNames(new Set(model.getSkeleton().bones.map((b) => b.name)))
+          setMorphNames(model.getMorphing().morphs.map((m) => m.name))
           model.setMorphWeight("抗穿模", 0.5)
           try {
             await model.loadAnimation(STUDIO_ANIM_NAME, VMD_PATH)
@@ -180,6 +202,9 @@ export default function Home() {
     return () => {
       disposed = true
       setPmxBoneNames(new Set())
+      setMorphNames([])
+      setActiveMorph(null)
+      setMorphWeightReadout(null)
       modelRef.current = null
       engineRef.current?.stopRenderLoop()
       engineRef.current?.dispose()
@@ -187,12 +212,23 @@ export default function Home() {
     }
   }, [])
 
-  // Keep model pose locked to timeline frame.
+  // Keep model pose locked to timeline frame; refresh morph weight readout when a morph is selected.
   useEffect(() => {
     const model = modelRef.current
     if (!model || !clip) return
     model.seek(Math.max(0, currentFrame) / 30)
-  }, [currentFrame, clip])
+    if (!activeMorph) {
+      setMorphWeightReadout(null)
+      return
+    }
+    const morphing = model.getMorphing()
+    const idx = morphing.morphs.findIndex((m) => m.name === activeMorph)
+    if (idx < 0) {
+      setMorphWeightReadout(null)
+      return
+    }
+    setMorphWeightReadout(model.getMorphWeights()[idx])
+  }, [currentFrame, clip, activeMorph])
 
   useEffect(() => {
     const model = modelRef.current
@@ -205,6 +241,65 @@ export default function Home() {
     if (!playing || frameCount <= 0) return
     if (currentFrame >= frameCount) setCurrentFrame(0)
   }, [playing, currentFrame, frameCount])
+
+  // Timeline key click: jump playhead; curve keys also focus the bone on the list.
+  useEffect(() => {
+    if (selectedKeyframes.length !== 1) return
+    const s = selectedKeyframes[0]
+    setActiveMorph(null)
+    if (s.type === "curve" && s.bone) setActiveBone(s.bone)
+    setCurrentFrame(s.frame)
+  }, [selectedKeyframes])
+
+  const deleteSelectedKeyframes = useCallback(() => {
+    if (!clip || selectedKeyframes.length !== 1) return
+    const sel = selectedKeyframes[0]
+    if (sel.type === "curve" && sel.bone) {
+      const track = clip.boneTracks.get(sel.bone)
+      if (!track) return
+      const i = track.findIndex((k) => k.frame === sel.frame)
+      if (i < 0) return
+      track.splice(i, 1)
+      if (track.length === 0) clip.boneTracks.delete(sel.bone)
+    } else if (sel.type === "dope") {
+      const f = sel.frame
+      const dropBones: string[] = []
+      for (const [name, track] of clip.boneTracks.entries()) {
+        const i = track.findIndex((k) => k.frame === f)
+        if (i >= 0) {
+          track.splice(i, 1)
+          if (track.length === 0) dropBones.push(name)
+        }
+      }
+      for (const name of dropBones) clip.boneTracks.delete(name)
+    } else return
+
+    setSelectedKeyframes([])
+    setClip({ ...clip, boneTracks: new Map(clip.boneTracks) })
+  }, [clip, selectedKeyframes])
+
+  const insertKeyframeAtPlayhead = useCallback(() => {
+    const model = modelRef.current
+    if (!clip || !activeBone || activeMorph || !model) return
+    const frame = Math.round(Math.max(0, Math.min(clip.frameCount, currentFrame)))
+    const pose = readLocalPoseAfterSeek(model, activeBone)
+    if (!pose) return
+
+    const prevTrack = clip.boneTracks.get(activeBone)
+    const ip = interpolationTemplateForFrame(prevTrack, frame)
+    const nextTrack = [...(prevTrack ?? [])].filter((k) => k.frame !== frame)
+    nextTrack.push({
+      boneName: activeBone,
+      frame,
+      rotation: pose.rotation,
+      translation: pose.translation,
+      interpolation: ip,
+    })
+    nextTrack.sort((a, b) => a.frame - b.frame)
+    const boneTracks = new Map(clip.boneTracks)
+    boneTracks.set(activeBone, nextTrack)
+    setClip({ ...clip, boneTracks })
+  }, [clip, activeBone, activeMorph, currentFrame])
 
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden text-foreground">
@@ -284,22 +379,27 @@ export default function Home() {
               </Menubar>
             </div>
           </div>
-          {/* Bone list */}
-          <div className="min-h-0 flex-1 overflow-hidden">
-            <BoneList
-              allBones={allBones}
-              selectedGroup={selectedGroup}
-              activeBone={activeBone}
-              onSelectGroup={handleSelectGroup}
-              onSelectBone={handleSelectBone}
-            />
-          </div>
-          <div className="shrink-0 space-y-2 border-t border-border px-3 py-2">
-            <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-              Morphs
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="min-h-0 flex-1 overflow-hidden">
+              <BoneList
+                allBones={allBones}
+                selectedGroup={selectedGroup}
+                activeBone={activeBone}
+                onSelectGroup={handleSelectGroup}
+                onSelectBone={handleSelectBone}
+              />
             </div>
-            <div className="h-24 rounded-md border border-dashed border-border bg-muted/30 p-2.5 text-[10px] text-muted-foreground">
-              Sliders area
+            <div className="flex max-h-[168px] shrink-0 flex-col border-t border-border">
+              <div className="shrink-0 px-3 pb-1 pt-2 text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
+                Morphs
+              </div>
+              <div className="min-h-0 flex-1 overflow-hidden">
+                <MorphList
+                  morphNames={morphNames}
+                  activeMorph={activeMorph}
+                  onSelectMorph={handleSelectMorph}
+                />
+              </div>
             </div>
           </div>
         </aside>
@@ -331,20 +431,21 @@ export default function Home() {
         </div>
 
         {/* Right sidebar */}
-        <aside className="flex w-[240px] shrink-0 flex-col border-l border-border">
-          <div className="flex min-h-9 shrink-0 items-center border-b border-border px-3 py-2 text-xs font-medium text-muted-foreground">
-            Selection / props
+        <aside className="flex w-[260px] shrink-0 flex-col border-l border-border">
+          <div className="flex min-h-9 shrink-0 items-center border-b border-border px-3 py-2 text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
+            Selection
           </div>
-          <div className="min-h-0 flex-1 space-y-2 overflow-auto px-3 py-2">
-            <div className="rounded-md border border-dashed border-border bg-muted/30 p-2.5 text-[10px] text-muted-foreground">
-              Rotation / position
-            </div>
-            <div className="rounded-md border border-dashed border-border bg-muted/30 p-2.5 text-[10px] text-muted-foreground">
-              Interpolation
-            </div>
-            <div className="rounded-md border border-dashed border-border bg-muted/30 p-2.5 text-[10px] text-muted-foreground">
-              Actions
-            </div>
+          <div className="min-h-0 flex-1 overflow-auto px-3 py-2">
+            <SelectionInspector
+              clip={clip}
+              currentFrame={currentFrame}
+              activeBone={activeBone}
+              activeMorph={activeMorph}
+              morphWeight={morphWeightReadout}
+              selectedKeyframes={selectedKeyframes}
+              onInsertKeyframeAtPlayhead={insertKeyframeAtPlayhead}
+              onDeleteSelectedKeyframes={deleteSelectedKeyframes}
+            />
           </div>
         </aside>
       </div>
