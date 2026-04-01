@@ -1,4 +1,4 @@
-import type { BoneInterpolation, BoneKeyframe, Model } from "reze-engine"
+import type { AnimationClip, BoneInterpolation, BoneKeyframe, Model } from "reze-engine"
 import { Quat, Vec3 } from "reze-engine"
 
 /** Default VMD-style linear-ish handles (127-space). */
@@ -44,6 +44,31 @@ export function interpolationTemplateForFrame(track: BoneKeyframe[] | undefined,
   return cloneBoneInterpolation(basis.interpolation)
 }
 
+/** Add or replace a key at `frame`; keeps existing interpolation when replacing, else template from neighbors. */
+export function upsertBoneKeyframeAtFrame(
+  clip: AnimationClip,
+  bone: string,
+  frame: number,
+  rotation: Quat,
+  translation: Vec3,
+): AnimationClip {
+  const prevTrack = clip.boneTracks.get(bone) ?? []
+  const existing = prevTrack.find((k) => k.frame === frame)
+  const ip = existing ? cloneBoneInterpolation(existing.interpolation) : interpolationTemplateForFrame(prevTrack, frame)
+  const nextTrack = prevTrack.filter((k) => k.frame !== frame)
+  nextTrack.push({
+    boneName: bone,
+    frame,
+    rotation,
+    translation,
+    interpolation: ip,
+  })
+  nextTrack.sort((a, b) => a.frame - b.frame)
+  const boneTracks = new Map(clip.boneTracks)
+  boneTracks.set(bone, nextTrack)
+  return { ...clip, boneTracks }
+}
+
 // Engine does not expose local pose yet; after `seek` this matches the drawn skeleton.
 type RuntimeAccess = {
   runtimeSkeleton: {
@@ -63,4 +88,15 @@ export function readLocalPoseAfterSeek(model: Model, boneName: string): { rotati
     rotation: r.clone(),
     translation: new Vec3(t.x, t.y, t.z),
   }
+}
+
+/** Direct local translation write (VMD pipeline uses moveBones with world-relative delta; inspector edits local space). */
+export function writeLocalTranslation(model: Model, boneName: string, t: Vec3): void {
+  const rt = (model as unknown as RuntimeAccess).runtimeSkeleton
+  const idx = rt.nameIndex[boneName]
+  if (idx === undefined || idx < 0) return
+  const lt = rt.localTranslations[idx]
+  lt.x = t.x
+  lt.y = t.y
+  lt.z = t.z
 }

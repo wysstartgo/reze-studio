@@ -64,17 +64,19 @@ export function bezierY(cp0: { x: number; y: number }, cp1: { x: number; y: numb
 export const DOPE_H = 34
 /** Frame ruler height (px); keep in sync with tick/label layout in timeline canvas draw. */
 export const RULER_H = 17
-export const LABEL_W = 52
+export const LABEL_W = 36
 export const DOT_R = 3.5
 export const DIAMOND = 5
-export const MIN_PX = 2
+export const MIN_PX = 1
 export const MAX_PX = 20
 
-/** Max zoom-out (min px/frame) for a given track width: show 0…frameCount inside [LABEL_W, width]. */
+/** Max zoom-out (min px/frame) for a given track width: show 0…frameCount inside [LABEL_W, width].
+ *  The floor is clamped so that at minimum zoom the frame ruler ticks remain readable
+ *  (at least ~1 px/frame, with label-gap logic in the canvas preventing overlap). */
 export function minPxPerFrameForViewport(trackWidthPx: number, frameCount: number): number {
   if (frameCount <= 0 || trackWidthPx <= LABEL_W + 1) return MIN_PX
   const fit = (trackWidthPx - LABEL_W) / frameCount
-  return Math.min(MIN_PX, Math.max(0.01, fit))
+  return Math.max(MIN_PX, Math.min(fit, MAX_PX))
 }
 
 export const C = {
@@ -342,6 +344,15 @@ export function boneDisplayLabel(boneName: string): string {
   const hasJp = /[\u3040-\u30ff\u4e00-\u9fff]/.test(boneName)
   if (!hasJp && boneName.toLowerCase().trim() === en.toLowerCase().trim()) return boneName
   return `${boneName} (${en})`
+}
+
+/** Sidebar-style two lines: English title + JP bone name when they differ (matches reference layout). */
+export function boneTitleSubtitle(boneName: string): { title: string; subtitle: string | null } {
+  const en = boneEnglishLookup(boneName)
+  const hasJp = /[\u3040-\u30ff\u4e00-\u9fff]/.test(boneName)
+  if (en && hasJp) return { title: en, subtitle: boneName }
+  if (en && boneName.toLowerCase().trim() !== en.toLowerCase().trim()) return { title: en, subtitle: boneName }
+  return { title: boneName, subtitle: null }
 }
 
 // ─── Channel definitions ─────────────────────────────────────────────────

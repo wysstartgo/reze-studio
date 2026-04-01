@@ -15,7 +15,6 @@ Web-native MMD animation editor in the browser (WebGPU).
 - [ ] Morph list with weight control
 - [ ] Animation layers with blend weights and bone masks
 - [ ] Rotation / translation sliders with direct numeric input
-- [ ] Visual Bézier curve editor widget for interpolation handles
 - [ ] Custom bone groups with mute / solo toggle
 - [ ] Clip operations: cut, copy, paste, mirrored paste (左↔右), import, time stretch
 - [ ] VMD export

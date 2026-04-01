@@ -19,7 +19,7 @@ import { BoneList } from "@/components/bone-list"
 import { MorphList } from "@/components/morph-list"
 import { SelectionInspector } from "@/components/selection-inspector"
 import { Timeline, type SelectedKeyframe } from "@/components/timeline"
-import { BONE_GROUPS } from "@/lib/animation"
+import { BONE_GROUPS, quatToEuler } from "@/lib/animation"
 import { interpolationTemplateForFrame, readLocalPoseAfterSeek } from "@/lib/keyframe-insert"
 import type { AnimationClip } from "reze-engine"
 
@@ -216,6 +216,7 @@ export default function Home() {
   useEffect(() => {
     const model = modelRef.current
     if (!model || !clip) return
+    model.loadAnimation(STUDIO_ANIM_NAME, clip)
     model.seek(Math.max(0, currentFrame) / 30)
     if (!activeMorph) {
       setMorphWeightReadout(null)
@@ -278,10 +279,26 @@ export default function Home() {
     setClip({ ...clip, boneTracks: new Map(clip.boneTracks) })
   }, [clip, selectedKeyframes])
 
+  const livePose = useMemo(() => {
+    const model = modelRef.current
+    if (!model || !activeBone || !clip) return null
+    // React clip can fork from the engine’s internal clip; push state back before seek/read so sliders stay in sync
+    model.loadAnimation(STUDIO_ANIM_NAME, clip)
+    model.seek(Math.max(0, currentFrame) / 30)
+    const p = readLocalPoseAfterSeek(model, activeBone)
+    if (!p) return null
+    return {
+      euler: quatToEuler(p.rotation),
+      translation: p.translation,
+    }
+  }, [currentFrame, clip, activeBone])
+
   const insertKeyframeAtPlayhead = useCallback(() => {
     const model = modelRef.current
     if (!clip || !activeBone || activeMorph || !model) return
     const frame = Math.round(Math.max(0, Math.min(clip.frameCount, currentFrame)))
+    model.loadAnimation(STUDIO_ANIM_NAME, clip)
+    model.seek(Math.max(0, currentFrame) / 30)
     const pose = readLocalPoseAfterSeek(model, activeBone)
     if (!pose) return
 
@@ -299,6 +316,8 @@ export default function Home() {
     const boneTracks = new Map(clip.boneTracks)
     boneTracks.set(activeBone, nextTrack)
     setClip({ ...clip, boneTracks })
+    // Focus inspector edit tools (sliders + curves) like selecting a key on the graph
+    setSelectedKeyframes([{ type: "curve", bone: activeBone, frame, channel: "rx" }])
   }, [clip, activeBone, activeMorph, currentFrame])
 
   return (
@@ -431,11 +450,14 @@ export default function Home() {
         </div>
 
         {/* Right sidebar */}
-        <aside className="flex w-[260px] shrink-0 flex-col border-l border-border">
-          <div className="flex min-h-9 shrink-0 items-center border-b border-border px-3 py-2 text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
-            Selection
+        <aside className="flex w-[280px] shrink-0 flex-col border-l border-border">
+          <div className="flex min-h-9 shrink-0 items-center justify-between border-b border-border px-3 py-2">
+            <span className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">Selection</span>
+            <span className="rounded bg-muted/90 px-1.5 py-0.5 text-[9px] font-medium capitalize text-muted-foreground">
+              {activeBone ? "bone" : activeMorph ? "morph" : "—"}
+            </span>
           </div>
-          <div className="min-h-0 flex-1 overflow-auto px-3 py-2">
+          <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-2 text-[11px] [scrollbar-width:thin]">
             <SelectionInspector
               clip={clip}
               currentFrame={currentFrame}
@@ -443,6 +465,9 @@ export default function Home() {
               activeMorph={activeMorph}
               morphWeight={morphWeightReadout}
               selectedKeyframes={selectedKeyframes}
+              modelRef={modelRef}
+              setClip={setClip}
+              livePose={livePose}
               onInsertKeyframeAtPlayhead={insertKeyframeAtPlayhead}
               onDeleteSelectedKeyframes={deleteSelectedKeyframes}
             />

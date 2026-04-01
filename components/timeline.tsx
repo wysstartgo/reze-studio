@@ -287,6 +287,8 @@ function TimelineCanvas({
     ctx.textAlign = "center"
     ctx.textBaseline = "bottom"
     const rulerTickTop = (maj: boolean) => (maj ? 2 : RULER_H - 4)
+    const minRulerLabelGapPx = 32
+    let lastRulerLabelX = -1e9
     for (let f = 0; f <= clip.frameCount; f += fStep) {
       const x = ox + f * pxPerFrame
       if (x < LABEL_W - 10 || x > w + 10) continue
@@ -296,9 +298,10 @@ function TimelineCanvas({
       ctx.moveTo(Math.round(x) + 0.5, rulerTickTop(isM))
       ctx.lineTo(Math.round(x) + 0.5, RULER_H)
       ctx.stroke()
-      if (isM) {
+      if (isM && x - lastRulerLabelX >= minRulerLabelGapPx) {
         ctx.fillStyle = C.rulerText
         ctx.fillText(String(f), x, RULER_H - 2)
+        lastRulerLabelX = x
       }
     }
 
@@ -319,26 +322,7 @@ function TimelineCanvas({
       ctx.lineTo(w, y)
       ctx.stroke()
 
-      if (isMajor) {
-        ctx.fillStyle = C.label
-        let ly = y
-        if (ly <= curveTop + rulerFontPx * 0.6) {
-          ctx.textBaseline = "top"
-          ly = curveTop + 1
-        } else if (ly >= curveBot - rulerFontPx * 0.6) {
-          ctx.textBaseline = "bottom"
-          ly = curveBot - 1
-        } else {
-          ctx.textBaseline = "middle"
-        }
-        if (isRight) {
-          ctx.textAlign = "left"
-          ctx.fillText(v.toFixed(v === Math.round(v) ? 0 : 1) + ax.unit, w - LABEL_W + 4, ly)
-        } else {
-          ctx.textAlign = "right"
-          ctx.fillText(v.toFixed(v === Math.round(v) ? 0 : 1) + ax.unit, LABEL_W - 4, ly)
-        }
-      }
+      // Value labels on the left are intentionally omitted for a cleaner look.
     }
 
     // Full-height Y-axis at plot left (grid lines already span curveTop..curveBot after clamp)
