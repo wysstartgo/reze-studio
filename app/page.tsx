@@ -1,7 +1,15 @@
 "use client"
 
-import { useEffect, useRef, useState, useMemo, useCallback, type ChangeEvent } from "react"
-import { Engine, Model, Vec3 } from "reze-engine"
+import {
+  useEffect,
+  useRef,
+  useState,
+  useMemo,
+  useCallback,
+  type ChangeEvent,
+  type InputHTMLAttributes,
+} from "react"
+import { Engine, Model, Vec3, parsePmxFolderInput, pmxFileAtRelativePath } from "reze-engine"
 import { Button } from "@/components/ui/button"
 import {
   Menubar,
@@ -15,18 +23,52 @@ import {
 } from "@/components/ui/menubar"
 import Link from "next/link"
 import Image from "next/image"
+import { FilePlus2, FolderOpen, FileMusic, FileDown } from "lucide-react"
 import { BoneList } from "@/components/bone-list"
 import { MorphList } from "@/components/morph-list"
 import { PropertiesInspector } from "@/components/properties-inspector"
 import { Timeline, type SelectedKeyframe } from "@/components/timeline"
 import { BONE_GROUPS, quatToEuler } from "@/lib/animation"
 import { interpolationTemplateForFrame, readLocalPoseAfterSeek } from "@/lib/keyframe-insert"
-import { animationClipFromJson, animationClipToJsonString } from "@/lib/clip-json"
-import type { AnimationClip } from "reze-engine"
+import type { AnimationClip, BoneKeyframe, MorphKeyframe } from "reze-engine"
+import {
+  saveMeta,
+  loadMeta,
+  saveClip as idbSaveClip,
+  loadClip as idbLoadClip,
+  clearClip as idbClearClip,
+} from "@/lib/editor-persist"
 
 const MODEL_PATH = "/models/reze/reze.pmx"
 const VMD_PATH = "/animations/miku.vmd"
 const STUDIO_ANIM_NAME = "studio"
+
+function emptyStudioClip(): AnimationClip {
+  return { boneTracks: new Map(), morphTracks: new Map(), frameCount: 0 }
+}
+
+/** Keep only tracks whose bones/morphs exist on the new model. */
+function clipRetainedForModel(
+  clip: AnimationClip,
+  boneNames: ReadonlySet<string>,
+  morphNames: ReadonlySet<string>,
+): AnimationClip {
+  const boneTracks = new Map<string, BoneKeyframe[]>()
+  for (const [name, track] of clip.boneTracks) {
+    if (!boneNames.has(name) || !track?.length) continue
+    boneTracks.set(name, track.map((kf) => ({ ...kf })))
+  }
+  const morphTracks = new Map<string, MorphKeyframe[]>()
+  for (const [name, track] of clip.morphTracks) {
+    if (!morphNames.has(name) || !track?.length) continue
+    morphTracks.set(name, track.map((kf) => ({ ...kf })))
+  }
+  let inferred = 0
+  for (const t of boneTracks.values()) for (const k of t) inferred = Math.max(inferred, k.frame)
+  for (const t of morphTracks.values()) for (const k of t) inferred = Math.max(inferred, k.frame)
+  const empty = boneTracks.size === 0 && morphTracks.size === 0
+  return { boneTracks, morphTracks, frameCount: empty ? 0 : Math.max(clip.frameCount, inferred) }
+}
 
 function downloadBlob(blob: Blob, filename: string) {
   const a = document.createElement("a")
@@ -57,6 +99,9 @@ export default function Home() {
   const modelRef = useRef<Model | null>(null)
   const [engineError, setEngineError] = useState<string | null>(null)
 
+  // ─── Persisted meta (deferred to useEffect to avoid SSR hydration mismatch) ──
+  const persistedMeta = useRef<ReturnType<typeof loadMeta> | null>(null)
+
   // ─── Clip synced with engine via loadClip(STUDIO_ANIM_NAME) / getClip ──
   const [clip, setClip] = useState<AnimationClip | null>(null)
   /** Model finished loading (file menu + export need a live Model instance). */
@@ -65,7 +110,11 @@ export default function Home() {
   const [clipDisplayName, setClipDisplayName] = useState("clip")
 
   const vmdInputRef = useRef<HTMLInputElement>(null)
-  const jsonInputRef = useRef<HTMLInputElement>(null)
+  const pmxFolderInputRef = useRef<HTMLInputElement>(null)
+  /** Matches `engine.loadModel` name so `removeModel` can swap uploads without patching the engine. */
+  const loadedModelNameRef = useRef("reze")
+  /** Folder files from the last pick — kept for multi-PMX selection flow. */
+  const pmxFolderFilesRef = useRef<File[] | null>(null)
   const frameCount = clip?.frameCount ?? 0
   /** PMX skeleton bone names; used to hide VMD tracks that do not exist on the loaded model. */
   const [pmxBoneNames, setPmxBoneNames] = useState<ReadonlySet<string>>(new Set())
@@ -93,14 +142,79 @@ export default function Home() {
   const [selectedGroup, setSelectedGroup] = useState("All Bones")
   const [selectedKeyframes, setSelectedKeyframes] = useState<SelectedKeyframe[]>([])
 
+  /** Folder upload contained multiple `.pmx`; user picks one then clicks Load. */
+  const [pmxPickFiles, setPmxPickFiles] = useState<File[] | null>(null)
+  const [pmxPickPaths, setPmxPickPaths] = useState<string[]>([])
+  const [pmxPickSelected, setPmxPickSelected] = useState("")
+  /** Radix menubar: which submenu is open (`""` = all closed). */
+  const [menubarValue, setMenubarValue] = useState("")
+
   const playRef = useRef(false)
   const lastT = useRef<number | null>(null)
+  /** Snapshotted before async PMX swap so clip/playhead survive `await loadModel`. */
+  const clipRef = useRef<AnimationClip | null>(null)
+  const currentFrameRef = useRef(0)
+  const clipDisplayNameRef = useRef("clip")
 
   const visibleBones = useMemo(() => {
     const g = BONE_GROUPS[selectedGroup]
     if (!g) return clipBones
     return g.filter((name) => clipBones.includes(name))
   }, [selectedGroup, clipBones])
+
+  useEffect(() => {
+    clipRef.current = clip
+  }, [clip])
+  useEffect(() => {
+    currentFrameRef.current = currentFrame
+  }, [currentFrame])
+  useEffect(() => {
+    clipDisplayNameRef.current = clipDisplayName
+  }, [clipDisplayName])
+
+  // ─── Persist editor state (interval + beforeunload) ──────────────────
+  /** Last clip reference that was written to IndexedDB — skip re-serializing the same object. */
+  const lastSavedClipRef = useRef<AnimationClip | null>(null)
+
+  const persistState = useCallback(() => {
+    saveMeta({
+      activeBone,
+      activeMorph,
+      selectedGroup,
+      currentFrame,
+      clipDisplayName,
+      hasClip: clip != null,
+    })
+    // Skip during playback (clip doesn't change) and when clip hasn't changed since last save.
+    if (playing || clip === lastSavedClipRef.current) return
+    const model = modelRef.current
+    if (clip && model) {
+      try {
+        model.loadClip(STUDIO_ANIM_NAME, clip)
+        const buf = model.exportVmd(STUDIO_ANIM_NAME)
+        void idbSaveClip(buf)
+      } catch { /* export can fail on empty clips — ignore */ }
+    } else {
+      void idbClearClip()
+    }
+    lastSavedClipRef.current = clip
+  }, [activeBone, activeMorph, selectedGroup, currentFrame, clipDisplayName, clip, playing])
+
+  const persistRef = useRef(persistState)
+  useEffect(() => {
+    persistRef.current = persistState
+  }, [persistState])
+
+  useEffect(() => {
+    const iv = setInterval(() => persistRef.current(), 5000)
+    const onUnload = () => persistRef.current()
+    window.addEventListener("beforeunload", onUnload)
+    return () => {
+      clearInterval(iv)
+      window.removeEventListener("beforeunload", onUnload)
+      persistRef.current()
+    }
+  }, [])
 
   // ─── Playback loop ───────────────────────────────────────────────────
   useEffect(() => {
@@ -215,19 +329,56 @@ export default function Home() {
 
         engine.runRenderLoop()
 
-        try {
-          await modelRef.current?.loadVmd(STUDIO_ANIM_NAME, VMD_PATH)
-          if (disposed) return
-          const c = modelRef.current?.getClip(STUDIO_ANIM_NAME)
-          if (c) {
-            setClip(c)
-            setClipDisplayName(sanitizeClipFilenameBase(fileStem(VMD_PATH)))
-            modelRef.current?.show(STUDIO_ANIM_NAME)
-            modelRef.current?.seek(0)
-            if (modelRef.current?.name === "reze") modelRef.current?.setMorphWeight("抗穿模", 0.5)
+        // Hydrate persisted meta (client-only — safe from SSR mismatch)
+        const meta = loadMeta()
+        persistedMeta.current = meta
+
+        // Restore persisted clip from IndexedDB, or fall back to default VMD
+        let restored = false
+        if (meta.hasClip && modelRef.current) {
+          try {
+            const buf = await idbLoadClip()
+            if (buf && !disposed) {
+              const blob = new Blob([buf], { type: "application/octet-stream" })
+              const url = URL.createObjectURL(blob)
+              try {
+                await modelRef.current.loadVmd(STUDIO_ANIM_NAME, url)
+                const c = modelRef.current.getClip(STUDIO_ANIM_NAME)
+                if (c) {
+                  setClip(c)
+                  setClipDisplayName(meta.clipDisplayName)
+                  setCurrentFrame(meta.currentFrame)
+                  setActiveBone(meta.activeBone)
+                  setActiveMorph(meta.activeMorph)
+                  setSelectedGroup(meta.selectedGroup)
+                  modelRef.current.show(STUDIO_ANIM_NAME)
+                  modelRef.current.seek(Math.max(0, meta.currentFrame) / 30)
+                  if (modelRef.current.name === "reze") modelRef.current.setMorphWeight("抗穿模", 0.5)
+                  restored = true
+                }
+              } finally {
+                URL.revokeObjectURL(url)
+              }
+            }
+          } catch (e) {
+            console.warn("Failed to restore persisted clip:", e)
           }
-        } catch (e) {
-          console.warn(`VMD load failed — add file at public${VMD_PATH}`, e)
+        }
+        if (!restored) {
+          try {
+            await modelRef.current?.loadVmd(STUDIO_ANIM_NAME, VMD_PATH)
+            if (disposed) return
+            const c = modelRef.current?.getClip(STUDIO_ANIM_NAME)
+            if (c) {
+              setClip(c)
+              setClipDisplayName(sanitizeClipFilenameBase(fileStem(VMD_PATH)))
+              modelRef.current?.show(STUDIO_ANIM_NAME)
+              modelRef.current?.seek(0)
+              if (modelRef.current?.name === "reze") modelRef.current?.setMorphWeight("抗穿模", 0.5)
+            }
+          } catch (e) {
+            console.warn(`VMD load failed — add file at public${VMD_PATH}`, e)
+          }
         }
         setStudioReady(true)
 
@@ -377,6 +528,154 @@ export default function Home() {
     if (model.name === "reze") model.setMorphWeight("抗穿模", 0.5)
   }, [])
 
+  const applyLoadedPmxModel = useCallback(
+    (
+      model: Model,
+      engineInstanceKey: string,
+      displayStem: string,
+      animationSnapshot: {
+        clip: AnimationClip | null
+        currentFrame: number
+        playing: boolean
+        clipDisplayName: string
+      },
+    ) => {
+      modelRef.current = model
+      loadedModelNameRef.current = engineInstanceKey
+      const sk = model.getSkeleton().bones.map((b) => b.name)
+      const boneSet = new Set(sk)
+      const morphNamesList = model.getMorphing().morphs.map((m) => m.name)
+      const morphSet = new Set(morphNamesList)
+      setPmxBoneNames(boneSet)
+      setModelBoneOrder(sk)
+      setMorphNames(morphNamesList)
+      setActiveBone((prev) => (prev && boneSet.has(prev) ? prev : null))
+      setActiveMorph((prev) => (prev && morphSet.has(prev) ? prev : null))
+      setSelectedKeyframes((prev) =>
+        prev.filter((s) => s.type !== "curve" || !s.bone || boneSet.has(s.bone)),
+      )
+
+      const prev = animationSnapshot.clip
+      const hasPrevTimeline =
+        prev != null &&
+        (prev.boneTracks.size > 0 || prev.morphTracks.size > 0 || prev.frameCount > 0)
+
+      let nextClip: AnimationClip
+      let nextDisplay: string
+      let nextFrame: number
+      let nextPlaying: boolean
+
+      if (hasPrevTimeline) {
+        nextClip = clipRetainedForModel(prev, boneSet, morphSet)
+        nextDisplay = animationSnapshot.clipDisplayName
+        nextFrame = Math.min(
+          Math.max(0, animationSnapshot.currentFrame),
+          Math.max(0, nextClip.frameCount),
+        )
+        nextPlaying = animationSnapshot.playing
+      } else {
+        nextClip = emptyStudioClip()
+        nextDisplay = sanitizeClipFilenameBase(displayStem)
+        nextFrame = 0
+        nextPlaying = false
+      }
+
+      model.loadClip(STUDIO_ANIM_NAME, nextClip)
+      setClip(nextClip)
+      setClipDisplayName(nextDisplay)
+      setCurrentFrame(nextFrame)
+      setPlaying(nextPlaying)
+      model.show(STUDIO_ANIM_NAME)
+      model.seek(nextFrame / 30)
+      if (nextPlaying) model.play()
+      else model.pause()
+      setEngineError(null)
+    },
+    [],
+  )
+
+  const loadPmxFromFolder = useCallback(
+    async (files: File[], pmxFile: File) => {
+      const engine = engineRef.current
+      if (!engine) {
+        window.alert("Viewport is not ready yet. Wait for the model to load, then try again.")
+        return
+      }
+      const stem = fileStem(pmxFile.name)
+      const instanceKey = `u_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
+      try {
+        engine.removeModel(loadedModelNameRef.current)
+      } catch {
+        /* removeModel is a no-op if the name is stale */
+      }
+      try {
+        const model = await engine.loadModel(instanceKey, { files, pmxFile })
+        await new Promise(resolve => requestAnimationFrame(resolve))
+        model.setName(sanitizeClipFilenameBase(stem))
+        applyLoadedPmxModel(model, instanceKey, stem, {
+          clip: clipRef.current,
+          currentFrame: currentFrameRef.current,
+          playing: playRef.current,
+          clipDisplayName: clipDisplayNameRef.current,
+        })
+      } catch (e) {
+        console.error("[pmx-upload] loadModel failed:", e)
+        window.alert(e instanceof Error ? e.message : String(e))
+      }
+    },
+    [applyLoadedPmxModel],
+  )
+
+  const onPickPmxFolder = useCallback(
+    async (e: ChangeEvent<HTMLInputElement>) => {
+      try {
+        const picked = parsePmxFolderInput(e.target.files)
+        e.target.value = ""
+
+        if (picked.status === "empty") return
+        if (picked.status === "not_directory") {
+          window.alert("Please select a folder, not individual files.")
+          return
+        }
+        if (picked.status === "no_pmx") {
+          window.alert("No .pmx file in the selected folder.")
+          return
+        }
+
+        setPmxPickFiles(null)
+        setPmxPickPaths([])
+        setPmxPickSelected("")
+
+        if (picked.status === "single") {
+          await loadPmxFromFolder(picked.files, picked.pmxFile)
+        } else {
+          pmxFolderFilesRef.current = picked.files
+          setPmxPickFiles(picked.files)
+          setPmxPickPaths(picked.pmxRelativePaths)
+          setPmxPickSelected(picked.pmxRelativePaths[0] ?? "")
+        }
+      } finally {
+        setMenubarValue("")
+      }
+    },
+    [loadPmxFromFolder],
+  )
+
+  const onConfirmPmxPick = useCallback(async () => {
+    const files = pmxPickFiles
+    const path = pmxPickSelected
+    if (!files || !path) return
+    const pmxFile = pmxFileAtRelativePath(files, path)
+    if (!pmxFile) {
+      window.alert("Could not find the selected PMX file.")
+      return
+    }
+    await loadPmxFromFolder(files, pmxFile)
+    setPmxPickFiles(null)
+    setPmxPickPaths([])
+    setPmxPickSelected("")
+  }, [loadPmxFromFolder, pmxPickFiles, pmxPickSelected])
+
   const onPickVmdFile = useCallback(
     async (e: ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0]
@@ -401,26 +700,6 @@ export default function Home() {
     [syncStudioAfterNewClip],
   )
 
-  const onPickJsonClip = useCallback(
-    async (e: ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0]
-      e.target.value = ""
-      const model = modelRef.current
-      if (!file || !model) return
-      try {
-        const text = await file.text()
-        const parsed = animationClipFromJson(text)
-        model.loadClip(STUDIO_ANIM_NAME, parsed)
-        setClip(parsed)
-        setClipDisplayName(sanitizeClipFilenameBase(fileStem(file.name)))
-        syncStudioAfterNewClip(model)
-      } catch (err) {
-        window.alert(err instanceof Error ? err.message : String(err))
-      }
-    },
-    [syncStudioAfterNewClip],
-  )
-
   const exportClipVmd = useCallback(() => {
     const model = modelRef.current
     if (!model || !clip) return
@@ -434,16 +713,24 @@ export default function Home() {
     }
   }, [clip, clipDisplayName])
 
-  const exportClipJson = useCallback(() => {
-    if (!clip) return
-    const base = sanitizeClipFilenameBase(clipDisplayName)
-    try {
-      const text = animationClipToJsonString(clip)
-      downloadBlob(new Blob([text], { type: "application/json;charset=utf-8" }), `${base}-export.json`)
-    } catch (err) {
-      window.alert(err instanceof Error ? err.message : String(err))
-    }
-  }, [clip, clipDisplayName])
+  const resetEditorState = useCallback(() => {
+    const model = modelRef.current
+    if (!model) return
+    const fresh = emptyStudioClip()
+    model.loadClip(STUDIO_ANIM_NAME, fresh)
+    setClip(fresh)
+    setClipDisplayName("clip")
+    setCurrentFrame(0)
+    setPlaying(false)
+    setActiveBone(null)
+    setActiveMorph(null)
+    setSelectedKeyframes([])
+    model.show(STUDIO_ANIM_NAME)
+    model.seek(0)
+    void idbClearClip()
+    saveMeta({ hasClip: false })
+    lastSavedClipRef.current = null
+  }, [])
 
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden text-foreground">
@@ -455,11 +742,13 @@ export default function Home() {
               <h1 className="scroll-m-20 max-w-[11rem] text-md font-extrabold leading-tight tracking-tight text-balance">
                 REZE STUDIO <span className="text-[11px] ml-0.5 text-muted-foreground font-normal">v0.1.0</span>
               </h1>
-              <Button variant="ghost" size="sm" asChild className="hover:bg-black hover:text-white rounded-full">
-                <Link href="https://github.com/AmyangXYZ/reze-studio" target="_blank">
-                  <Image src="/github-mark-white.svg" alt="GitHub" width={16} height={16} />
-                </Link>
-              </Button>
+              <div className="flex shrink-0 items-center gap-0.5">
+                <Button variant="ghost" size="sm" asChild className="hover:bg-black hover:text-white rounded-full">
+                  <Link href="https://github.com/AmyangXYZ/reze-studio" target="_blank">
+                    <Image src="/github-mark-white.svg" alt="GitHub" width={16} height={16} />
+                  </Link>
+                </Button>
+              </div>
             </div>
 
             <div className="px-3 pb-2">
@@ -472,17 +761,21 @@ export default function Home() {
                 aria-hidden
                 onChange={onPickVmdFile}
               />
+              {/* Off-screen, not `hidden`/`display:none` — some browsers ignore .click() on those. */}
               <input
-                ref={jsonInputRef}
+                ref={pmxFolderInputRef}
                 type="file"
-                accept=".json,application/json"
-                className="hidden"
-                tabIndex={-1}
-                aria-hidden
-                onChange={onPickJsonClip}
+                className="fixed left-0 top-0 -z-10 h-px w-px opacity-0"
+                multiple
+                {...({ webkitdirectory: "", mozdirectory: "" } as InputHTMLAttributes<HTMLInputElement>)}
+                onChange={onPickPmxFolder}
               />
-              <Menubar className="h-4 gap-0 rounded-none border-0 bg-transparent p-0 shadow-none">
-                <MenubarMenu>
+              <Menubar
+                value={menubarValue}
+                onValueChange={setMenubarValue}
+                className="h-4 gap-0 rounded-none border-0 bg-transparent p-0 shadow-none"
+              >
+                <MenubarMenu value="file">
                   <MenubarTrigger className="h-4 rounded-sm px-1.5 py-0 text-xs font-normal text-muted-foreground">
                     File
                   </MenubarTrigger>
@@ -491,22 +784,32 @@ export default function Home() {
                     className="min-w-[10.5rem] p-0.5 text-xs"
                   >
                     <MenubarGroup>
-                      <MenubarItem className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground" disabled>
-                        Load PMX model…
+                      <MenubarItem
+                        className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                        disabled={!studioReady}
+                        onSelect={resetEditorState}
+                      >
+                        <FilePlus2 className="size-3.5" />
+                        New
+                      </MenubarItem>
+                      <MenubarSeparator className="my-0.5" />
+                      <MenubarItem
+                        className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                        onSelect={(e) => {
+                          e.preventDefault()
+                          pmxFolderInputRef.current?.click()
+                        }}
+                      >
+                        <FolderOpen className="size-3.5" />
+                        Load PMX folder…
                       </MenubarItem>
                       <MenubarItem
                         className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
                         disabled={!studioReady}
                         onSelect={() => vmdInputRef.current?.click()}
                       >
+                        <FileMusic className="size-3.5" />
                         Load VMD…
-                      </MenubarItem>
-                      <MenubarItem
-                        className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
-                        disabled={!studioReady}
-                        onSelect={() => jsonInputRef.current?.click()}
-                      >
-                        Load JSON clip…
                       </MenubarItem>
                     </MenubarGroup>
                     <MenubarSeparator className="my-0.5" />
@@ -516,19 +819,13 @@ export default function Home() {
                         disabled={!studioReady || !clip}
                         onSelect={exportClipVmd}
                       >
+                        <FileDown className="size-3.5" />
                         Export VMD…
-                      </MenubarItem>
-                      <MenubarItem
-                        className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
-                        disabled={!clip}
-                        onSelect={exportClipJson}
-                      >
-                        Export JSON…
                       </MenubarItem>
                     </MenubarGroup>
                   </MenubarContent>
                 </MenubarMenu>
-                <MenubarMenu>
+                <MenubarMenu value="edit">
                   <MenubarTrigger className="h-4 rounded-sm px-1.5 py-0 text-xs font-normal text-muted-foreground">
                     Edit
                   </MenubarTrigger>
@@ -545,7 +842,7 @@ export default function Home() {
                     </MenubarGroup>
                   </MenubarContent>
                 </MenubarMenu>
-                <MenubarMenu>
+                <MenubarMenu value="preferences">
                   <MenubarTrigger className="h-4 rounded-sm px-1.5 py-0 text-xs font-normal text-muted-foreground">
                     Preferences
                   </MenubarTrigger>
@@ -561,6 +858,31 @@ export default function Home() {
                   </MenubarContent>
                 </MenubarMenu>
               </Menubar>
+              {pmxPickFiles && pmxPickPaths.length > 1 ? (
+                <div className="mt-2 flex flex-col gap-1.5 rounded border border-border bg-muted/30 p-2 text-[10px]">
+                  <span className="text-muted-foreground">Multiple .pmx files — choose one:</span>
+                  <select
+                    className="w-full rounded border border-border bg-background px-1 py-0.5 text-[11px]"
+                    value={pmxPickSelected}
+                    onChange={(e) => setPmxPickSelected(e.target.value)}
+                  >
+                    {pmxPickPaths.map((p) => (
+                      <option key={p} value={p}>
+                        {p}
+                      </option>
+                    ))}
+                  </select>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    className="h-7 text-[11px]"
+                    onClick={() => void onConfirmPmxPick()}
+                  >
+                    Load selected PMX
+                  </Button>
+                </div>
+              ) : null}
             </div>
           </div>
           <div className="flex min-h-0 flex-1 flex-col">

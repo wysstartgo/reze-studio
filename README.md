@@ -10,17 +10,18 @@ Web-native MMD animation editor in the browser (WebGPU).
 - [x] Timeline with dope sheet and per-channel curve editor
 - [x] Bézier interpolation curve editing
 - [x] Keyframe insert / delete at playhead
-- [ ] Bone list with grouped hierarchy
-- [ ] GPU picking selection
-- [ ] Morph list with weight control
+- [x] VMD import/export
+- [x] Load user's PMX model from local folder
+- [x] Bone list with grouped hierarchy
+- [x] Morph list
+- [x] Keyboard shortcuts (Space, Arrow keys, Home/End)
+- [x] Session persistence (IndexedDB for animation data, localStorage for editor state)
+- [x] Rotation / translation sliders with direct numeric input
+- [ ] Morph weight keyframing
 - [ ] Animation layers with blend weights and bone masks
-- [ ] Rotation / translation sliders with direct numeric input
 - [ ] Custom bone groups with mute / solo toggle
 - [ ] Clip operations: cut, copy, paste, mirrored paste (左↔右), import, time stretch
-- [ ] VMD export
 - [ ] Undo / redo
-- [ ] Keyboard shortcuts
-- [ ] Project persistence (localStorage auto-save + cloud sync via Clerk / Supabase)
 - [ ] 3D transform gizmos in viewport
 - [ ] Mocap import (video → VMD)
 - [ ] Overleaf style real-time collaboration
