@@ -330,6 +330,12 @@ export default function Home() {
   // ─── Keyboard shortcuts ──────────────────────────────────────────────
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Don't hijack keys while the user is typing into an input/textarea/contenteditable.
+      const t = e.target as HTMLElement | null
+      if (t) {
+        const tag = t.tagName
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable) return
+      }
       if (e.code === "Space") {
         e.preventDefault()
         setPlaying((p) => !p)
@@ -627,10 +633,22 @@ export default function Home() {
       livePoseStableRef.current = null
       return null
     }
-    const next = {
-      euler: quatToEuler(p.rotation),
-      translation: p.translation,
-    }
+    // Prefer the stored keyframe value at the current frame when one exists:
+    // the runtime skeleton returns the post-IK / post-constraint rotation, so
+    // bones under an IK chain would otherwise display a different value than
+    // what's actually stored in the keyframe (and what the timeline shows).
+    const frameInt = Math.round(Math.max(0, currentFrame))
+    const boneTrack = clip.boneTracks.get(activeBone)
+    const kfAt = boneTrack?.find((k) => k.frame === frameInt)
+    const next = kfAt
+      ? {
+          euler: quatToEuler(kfAt.rotation),
+          translation: kfAt.translation,
+        }
+      : {
+          euler: quatToEuler(p.rotation),
+          translation: p.translation,
+        }
     const prev = livePoseStableRef.current
     if (prev && poseNearEqual(prev, next)) return prev
     livePoseStableRef.current = next
@@ -950,7 +968,7 @@ export default function Home() {
         </div>
 
         {/* Right sidebar — properties for active bone / morph / keyframe context */}
-        <aside className="flex w-[256px] shrink-0 flex-col border-l border-sidebar-border text-sidebar-foreground">
+        <aside className="flex w-64 shrink-0 flex-col border-l border-sidebar-border text-sidebar-foreground">
           <div className="flex min-h-9 shrink-0 items-center border-b border-sidebar-border px-3 py-2">
             <span className="text-[11px] font-medium uppercase tracking-widest text-sidebar-foreground/70">
               Properties

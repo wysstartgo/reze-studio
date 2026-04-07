@@ -22,7 +22,7 @@ import {
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
-import type { AnimationClip, BoneKeyframe } from "reze-engine"
+import type { AnimationClip, BoneKeyframe, MorphKeyframe } from "reze-engine"
 import {
   type Channel,
   ROT_CHANNELS,
@@ -38,6 +38,8 @@ const DOT_R = 3.5
 const DIAMOND = 5
 const MIN_PX = 0.5
 const MAX_PX = 40
+const Y_ZOOM_MIN = 0.5
+const Y_ZOOM_MAX = 8
 
 function minPxPerFrameForViewport(trackWidthPx: number, frameCount: number): number {
   if (frameCount <= 0 || trackWidthPx <= LABEL_W + 1) return MIN_PX
@@ -136,12 +138,12 @@ function getAxisConfig(tab: string) {
 const MORPH_COLOR = "#c084fc"
 
 const TABS = [
-  { key: "allRot", label: "All Rotations", color: null, sep: false },
+  { key: "allRot", label: "All Rot", color: null, sep: false },
   { key: "rx", label: "X", color: C.rotX, sep: false },
   { key: "ry", label: "Y", color: C.rotY, sep: false },
   { key: "rz", label: "Z", color: C.rotZ, sep: false },
   { key: "_sep1", label: "", color: null, sep: true },
-  { key: "allTra", label: "All Translations", color: null, sep: false },
+  { key: "allTra", label: "All Trans", color: null, sep: false },
   { key: "tx", label: "X", color: C.traX, sep: false },
   { key: "ty", label: "Y", color: C.traY, sep: false },
   { key: "tz", label: "Z", color: C.traZ, sep: false },
@@ -219,7 +221,7 @@ function TransportFrameSlider({
           e.preventDefault()
         }}
         className={cn(
-          "relative h-5 w-[88px] shrink-0 touch-none",
+          "relative h-5 w-14 shrink-0 touch-none",
           disabled ? "pointer-events-none opacity-15" : "cursor-grab",
         )}
       >
@@ -365,6 +367,7 @@ function ZoomRuler({
 interface TimelineCanvasProps {
   clip: AnimationClip
   pxPerFrame: number
+  yZoom: number
   scrollX: number
   currentFrame: number
   activeBone: string | null
@@ -374,14 +377,19 @@ interface TimelineCanvasProps {
   tab: string
   onSetCurrentFrame: (f: number) => void
   onSelectKeyframe: (kf: SelectedKeyframe, multi: boolean) => void
-  onMoveDopeKeyframe: (from: number, to: number) => void
-  onMoveCurveKeyframe: (bone: string, from: number, channel: string, toFrame: number, dv: number) => void
-  onMoveMorphKeyframe: (morph: string, from: number, toFrame: number, dw: number) => void
+  onMoveDopeKeyframe: (
+    boneRefs: Array<{ bone: string; kf: BoneKeyframe }>,
+    morphRefs: Array<{ morph: string; kf: MorphKeyframe }>,
+    toFrame: number,
+  ) => void
+  onMoveCurveKeyframe: (bone: string, kfRef: BoneKeyframe, channel: string, toFrame: number, dv: number) => void
+  onMoveMorphKeyframe: (morph: string, kfRef: MorphKeyframe, toFrame: number, dw: number) => void
 }
 
 function TimelineCanvas({
   clip,
   pxPerFrame,
+  yZoom,
   scrollX,
   currentFrame,
   activeBone,
@@ -400,11 +408,15 @@ function TimelineCanvas({
   const sizeRef = useRef({ w: 0, h: 0, dpr: 0 })
   const drag = useRef<{
     type: string
-    frame?: number
     bone?: string
     channel?: string
     startX?: number
     startY?: number
+    boneKfRef?: BoneKeyframe
+    morphKfRef?: MorphKeyframe
+    dopeBoneRefs?: Array<{ bone: string; kf: BoneKeyframe }>
+    dopeMorphRefs?: Array<{ morph: string; kf: MorphKeyframe }>
+    dopeFrame?: number
   } | null>(null)
 
   const getDopeFrames = useCallback(() => {
@@ -451,7 +463,12 @@ function TimelineCanvas({
 
     const channels = getChannelsForTab(tab)
     const ax = getAxisConfig(tab)
-    const toY = (v: number) => curveTop + (1 - (v - ax.min) / (ax.max - ax.min)) * curveH
+    // Y-zoom: shrink the visible value range around the axis center.
+    const axCenter = (ax.min + ax.max) / 2
+    const axHalf = (ax.max - ax.min) / 2 / Math.max(0.0001, yZoom)
+    const vMin = axCenter - axHalf
+    const vMax = axCenter + axHalf
+    const toY = (v: number) => curveTop + (1 - (v - vMin) / (vMax - vMin)) * curveH
     const toX = (f: number) => ox + f * pxPerFrame
 
     // ── Backgrounds ──
@@ -507,11 +524,14 @@ function TimelineCanvas({
     ctx.font = `9px ${FONT}`
     const isRight = false
     const isRotAxis = channels[0]?.group === "rot"
-    const vSteps = Math.max(0, Math.ceil((ax.max - ax.min) / ax.subStep))
+    // Snap tick iteration to multiples of subStep within the current view range.
+    const firstTick = Math.ceil(vMin / ax.subStep) * ax.subStep
+    const lastTick = Math.floor(vMax / ax.subStep) * ax.subStep
+    const vSteps = Math.max(0, Math.round((lastTick - firstTick) / ax.subStep))
     for (let i = 0; i <= vSteps; i++) {
-      const v = Math.min(ax.max, ax.min + i * ax.subStep)
-      let y = toY(v)
-      y = Math.max(curveTop, Math.min(curveBot, y))
+      const v = firstTick + i * ax.subStep
+      if (v < vMin - 0.0001 || v > vMax + 0.0001) continue
+      const y = toY(v)
       const isZero = Math.abs(v) < 0.001
       const isMajor = Math.abs(v % ax.step) < 0.001
       const stroke = isZero ? C.axisZero : isMajor ? C.axis : C.grid
@@ -565,7 +585,11 @@ function TimelineCanvas({
       ctx.stroke()
     }
 
-    // ── Curves ──
+    // ── Curves ── (clip to plot area so zoomed-out-of-view values don't bleed)
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(LABEL_W, curveTop, w - LABEL_W, curveBot - curveTop)
+    ctx.clip()
     const isMorphTab = tab === "morph"
     if (isMorphTab) {
       // ── Morph weight curve ──
@@ -716,6 +740,7 @@ function TimelineCanvas({
       ctx.textBaseline = "middle"
       ctx.fillText("Select a bone to view curves", (w + LABEL_W) / 2, (curveTop + curveBot) / 2)
     }
+    ctx.restore()
 
     // ── Dopesheet ──
     const frames = getDopeFrames()
@@ -794,7 +819,7 @@ function TimelineCanvas({
       ctx.closePath()
       ctx.fill()
     }
-  }, [clip, pxPerFrame, scrollX, currentFrame, activeBone, activeMorph, visibleBones, selectedKeyframes, tab, getDopeFrames])
+  }, [clip, pxPerFrame, yZoom, scrollX, currentFrame, activeBone, activeMorph, visibleBones, selectedKeyframes, tab, getDopeFrames])
 
   useEffect(() => {
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current)
@@ -831,7 +856,11 @@ function TimelineCanvas({
       const dopeY = h - DOPE_H
       const curveH = dopeY - 1 - RULER_H
       const ax = getAxisConfig(tab)
-      const toY = (v: number) => RULER_H + (1 - (v - ax.min) / (ax.max - ax.min)) * curveH
+      const axCenter = (ax.min + ax.max) / 2
+      const axHalf = (ax.max - ax.min) / 2 / Math.max(0.0001, yZoom)
+      const vMin = axCenter - axHalf
+      const vMax = axCenter + axHalf
+      const toY = (v: number) => RULER_H + (1 - (v - vMin) / (vMax - vMin)) * curveH
       const toX = (f: number) => ox + f * pxPerFrame
 
       if (my < RULER_H) {
@@ -878,7 +907,7 @@ function TimelineCanvas({
       const f = Math.round((mx - ox) / pxPerFrame)
       return { zone: "ruler" as const, frame: Math.max(0, Math.min(clip.frameCount, f)) }
     },
-    [clip, pxPerFrame, scrollX, activeBone, activeMorph, tab, getDopeFrames],
+    [clip, pxPerFrame, yZoom, scrollX, activeBone, activeMorph, tab, getDopeFrames],
   )
 
   const onMouseDown = useCallback(
@@ -890,8 +919,32 @@ function TimelineCanvas({
         drag.current = { type: "scrub" }
       } else if (hit.zone === "dope") {
         onSelectKeyframe({ frame: hit.frame, type: "dope" }, e.shiftKey)
-        drag.current = { type: "dope", frame: hit.frame, startX: e.clientX }
+        // Capture references to all keyframes (across bones/morphs) sharing this frame
+        const dopeBoneRefs: Array<{ bone: string; kf: BoneKeyframe }> = []
+        const dopeMorphRefs: Array<{ morph: string; kf: MorphKeyframe }> = []
+        if (tab === "morph" && activeMorph) {
+          const track = clip.morphTracks.get(activeMorph)
+          const kf = track?.find((k) => k.frame === hit.frame)
+          if (kf) dopeMorphRefs.push({ morph: activeMorph, kf })
+        } else {
+          const bones = activeBone ? [activeBone] : visibleBones
+          for (const name of bones) {
+            const track = clip.boneTracks.get(name)
+            const kf = track?.find((k) => k.frame === hit.frame)
+            if (kf) dopeBoneRefs.push({ bone: name, kf })
+          }
+        }
+        drag.current = {
+          type: "dope",
+          startX: e.clientX,
+          dopeBoneRefs,
+          dopeMorphRefs,
+          dopeFrame: hit.frame,
+        }
       } else if (hit.zone === "morph-curve") {
+        const track = clip.morphTracks.get(hit.morph)
+        const kfRef = track?.find((k) => k.frame === hit.frame)
+        if (!kfRef) return
         onSelectKeyframe(
           { morph: hit.morph, frame: hit.frame, type: "curve" },
           e.shiftKey,
@@ -899,11 +952,14 @@ function TimelineCanvas({
         drag.current = {
           type: "morph-curve",
           bone: hit.morph,
-          frame: hit.frame,
+          morphKfRef: kfRef,
           startX: e.clientX,
           startY: e.clientY,
         }
       } else if (hit.zone === "curve") {
+        const track = clip.boneTracks.get(hit.bone)
+        const kfRef = track?.find((k) => k.frame === hit.frame)
+        if (!kfRef) return
         onSelectKeyframe(
           { bone: hit.bone, frame: hit.frame, channel: hit.channel, type: "curve" },
           e.shiftKey,
@@ -911,14 +967,14 @@ function TimelineCanvas({
         drag.current = {
           type: "curve",
           bone: hit.bone,
-          frame: hit.frame,
+          boneKfRef: kfRef,
           channel: hit.channel,
           startX: e.clientX,
           startY: e.clientY,
         }
       }
     },
-    [hitTest, onSetCurrentFrame, onSelectKeyframe],
+    [hitTest, onSetCurrentFrame, onSelectKeyframe, clip, tab, activeBone, activeMorph, visibleBones],
   )
 
   const onMouseMove = useCallback(
@@ -937,9 +993,10 @@ function TimelineCanvas({
       if (drag.current?.type === "dope") {
         const dx = e.clientX - (drag.current.startX ?? 0)
         const df = Math.round(dx / pxPerFrame)
-        if (df !== 0 && drag.current.frame !== undefined) {
-          onMoveDopeKeyframe(drag.current.frame, drag.current.frame + df)
-          drag.current.frame += df
+        if (df !== 0 && drag.current.dopeFrame !== undefined) {
+          const newFrame = drag.current.dopeFrame + df
+          onMoveDopeKeyframe(drag.current.dopeBoneRefs ?? [], drag.current.dopeMorphRefs ?? [], newFrame)
+          drag.current.dopeFrame = Math.max(0, newFrame)
           drag.current.startX = e.clientX
         }
         return
@@ -951,14 +1008,12 @@ function TimelineCanvas({
         const h = el.clientHeight
         const curveH = h - DOPE_H - 1 - RULER_H
         const ax = getAxisConfig(tab)
-        const dw = -(dy / curveH) * (ax.max - ax.min)
-        if ((df !== 0 || Math.abs(dw) > 0.005) && drag.current.bone && drag.current.frame !== undefined) {
-          const newFrame = df !== 0 ? drag.current.frame + df : drag.current.frame
-          onMoveMorphKeyframe(drag.current.bone, drag.current.frame, newFrame, dw)
-          if (df !== 0) {
-            drag.current.frame += df
-            drag.current.startX = e.clientX
-          }
+        const dw = -(dy / curveH) * ((ax.max - ax.min) / Math.max(0.0001, yZoom))
+        const ref = drag.current.morphKfRef
+        if ((df !== 0 || Math.abs(dw) > 0.005) && drag.current.bone && ref) {
+          const newFrame = ref.frame + df
+          onMoveMorphKeyframe(drag.current.bone, ref, newFrame, dw)
+          if (df !== 0) drag.current.startX = e.clientX
           drag.current.startY = e.clientY
         }
         return
@@ -970,14 +1025,12 @@ function TimelineCanvas({
         const h = el.clientHeight
         const curveH = h - DOPE_H - 1 - RULER_H
         const ax = getAxisConfig(tab)
-        const dv = -(dy / curveH) * (ax.max - ax.min)
-        if ((df !== 0 || Math.abs(dv) > 0.01) && drag.current.bone && drag.current.channel && drag.current.frame !== undefined) {
-          const newFrame = df !== 0 ? drag.current.frame + df : drag.current.frame
-          onMoveCurveKeyframe(drag.current.bone, drag.current.frame, drag.current.channel, newFrame, dv)
-          if (df !== 0) {
-            drag.current.frame += df
-            drag.current.startX = e.clientX
-          }
+        const dv = -(dy / curveH) * ((ax.max - ax.min) / Math.max(0.0001, yZoom))
+        const ref = drag.current.boneKfRef
+        if ((df !== 0 || Math.abs(dv) > 0.01) && drag.current.bone && drag.current.channel && ref) {
+          const newFrame = ref.frame + df
+          onMoveCurveKeyframe(drag.current.bone, ref, drag.current.channel, newFrame, dv)
+          if (df !== 0) drag.current.startX = e.clientX
           drag.current.startY = e.clientY
         }
         return
@@ -993,7 +1046,7 @@ function TimelineCanvas({
               ? "col-resize"
               : "default"
     },
-    [hitTest, pxPerFrame, scrollX, clip, tab, onSetCurrentFrame, onMoveDopeKeyframe, onMoveCurveKeyframe, onMoveMorphKeyframe],
+    [hitTest, pxPerFrame, yZoom, scrollX, clip, tab, onSetCurrentFrame, onMoveDopeKeyframe, onMoveCurveKeyframe, onMoveMorphKeyframe],
   )
 
   const onMouseUp = useCallback(() => {
@@ -1052,9 +1105,13 @@ export const Timeline = memo(function Timeline({
 }: TimelineProps) {
   const fc = clip?.frameCount ?? 0
   const [endDraft, setEndDraft] = useState<string | null>(null)
+  const [frameDraft, setFrameDraft] = useState<string | null>(null)
   const [pxPerFrame, setPxPerFrame] = useState(4)
   const pxRef = useRef(pxPerFrame)
   pxRef.current = pxPerFrame
+  const [yZoom, setYZoom] = useState(1)
+  const yZoomRef = useRef(yZoom)
+  yZoomRef.current = yZoom
   const [scrollX, setScrollX] = useState(0)
   const scrollXRef = useRef(0)
   scrollXRef.current = scrollX
@@ -1084,6 +1141,7 @@ export const Timeline = memo(function Timeline({
     clipVersionRef.current = clipVersion
     setScrollX(0)
     setPxPerFrame(4)
+    setYZoom(1)
     setEndDraft(null)
   }, [clipVersion])
 
@@ -1134,6 +1192,10 @@ export const Timeline = memo(function Timeline({
     (e: React.WheelEvent) => {
       e.preventDefault()
       if (e.ctrlKey || e.metaKey) zoomTo(pxRef.current - e.deltaY * 0.02)
+      else if (e.shiftKey) {
+        const factor = Math.exp(-e.deltaY * 0.002)
+        setYZoom((z) => Math.max(Y_ZOOM_MIN, Math.min(Y_ZOOM_MAX, z * factor)))
+      }
       else setScrollX((p) => Math.max(0, p + e.deltaX + e.deltaY))
     },
     [zoomTo],
@@ -1155,61 +1217,66 @@ export const Timeline = memo(function Timeline({
   )
 
   const onMoveDopeKeyframe = useCallback(
-    (from: number, to: number) => {
+    (
+      boneRefs: Array<{ bone: string; kf: BoneKeyframe }>,
+      morphRefs: Array<{ morph: string; kf: MorphKeyframe }>,
+      toFrame: number,
+    ) => {
       if (!clip) return
-      const clamped = Math.max(0, to)
-      if (clamped === from) return
-      if (tab === "morph" && activeMorph) {
-        const track = clip.morphTracks.get(activeMorph)
-        if (track) {
-          const kf = track.find((k) => k.frame === from)
-          if (kf) kf.frame = clamped
-          track.sort((a, b) => a.frame - b.frame)
-        }
-        setSelectedKeyframes((prev) =>
-          prev.map((s) => (s.frame === from && s.type === "dope" ? { ...s, frame: clamped } : s)),
-        )
-        setClip((c) => (c ? { ...c, morphTracks: new Map(c.morphTracks) } : null))
-      } else {
-        const bones = activeBone ? [activeBone] : visibleBones
-        for (const name of bones) {
-          const track = clip.boneTracks.get(name)
-          if (!track) continue
-          const kf = track.find((k) => k.frame === from)
-          if (kf) kf.frame = clamped
-          track.sort((a, b) => a.frame - b.frame)
-        }
-        setSelectedKeyframes((prev) =>
-          prev.map((s) => (s.frame === from && s.type === "dope" ? { ...s, frame: clamped } : s)),
-        )
-        setClip((c) => (c ? { ...c, boneTracks: new Map(c.boneTracks) } : null))
+      const clamped = Math.max(0, toFrame)
+      // Use the first ref's old frame as the "from" identifier for selection updates
+      const fromFrame =
+        boneRefs[0]?.kf.frame ?? morphRefs[0]?.kf.frame
+      if (fromFrame === undefined || clamped === fromFrame) return
+      for (const { bone, kf } of boneRefs) {
+        kf.frame = clamped
+        const track = clip.boneTracks.get(bone)
+        track?.sort((a, b) => a.frame - b.frame)
       }
+      for (const { morph, kf } of morphRefs) {
+        kf.frame = clamped
+        const track = clip.morphTracks.get(morph)
+        track?.sort((a, b) => a.frame - b.frame)
+      }
+      setSelectedKeyframes((prev) =>
+        prev.map((s) => (s.frame === fromFrame && s.type === "dope" ? { ...s, frame: clamped } : s)),
+      )
+      setClip((c) =>
+        c
+          ? {
+              ...c,
+              boneTracks: boneRefs.length ? new Map(c.boneTracks) : c.boneTracks,
+              morphTracks: morphRefs.length ? new Map(c.morphTracks) : c.morphTracks,
+            }
+          : null,
+      )
       forceRedraw((n) => n + 1)
     },
-    [clip, activeBone, activeMorph, visibleBones, tab, setSelectedKeyframes, setClip],
+    [clip, setSelectedKeyframes, setClip],
   )
 
   const onMoveCurveKeyframe = useCallback(
-    (bone: string, from: number, chKey: string, toFrame: number, dv: number) => {
+    (bone: string, kfRef: BoneKeyframe, chKey: string, toFrame: number, dv: number) => {
       if (!clip) return
       const track = clip.boneTracks.get(bone)
-      if (!track) return
+      if (!track || !track.includes(kfRef)) return
       const clamped = Math.max(0, toFrame)
-      const kf = track.find((k: BoneKeyframe) => k.frame === from)
-      if (!kf) return
-      if (clamped !== from) {
-        kf.frame = clamped
+      const fromFrame = kfRef.frame
+      if (clamped !== fromFrame) {
+        kfRef.frame = clamped
         track.sort((a: BoneKeyframe, b: BoneKeyframe) => a.frame - b.frame)
       }
       if (dv) {
         const ch = ALL_CHANNELS.find((c) => c.key === chKey)
         if (ch) {
-          const cur = ch.get(kf)
-          ch.set(kf, cur + dv)
+          const cur = ch.get(kfRef)
+          ch.set(kfRef, cur + dv)
         }
       }
       setSelectedKeyframes((prev) =>
-        prev.map((s) => (s.bone === bone && s.frame === from && s.channel === chKey ? { ...s, frame: clamped } : s)),
+        prev.map((s) =>
+          s.bone === bone && s.frame === fromFrame && s.channel === chKey ? { ...s, frame: clamped } : s,
+        ),
       )
       setClip((c) => (c ? { ...c, boneTracks: new Map(c.boneTracks) } : null))
       forceRedraw((n) => n + 1)
@@ -1218,22 +1285,21 @@ export const Timeline = memo(function Timeline({
   )
 
   const onMoveMorphKeyframe = useCallback(
-    (morph: string, from: number, toFrame: number, dw: number) => {
+    (morph: string, kfRef: MorphKeyframe, toFrame: number, dw: number) => {
       if (!clip) return
       const track = clip.morphTracks.get(morph)
-      if (!track) return
+      if (!track || !track.includes(kfRef)) return
       const clamped = Math.max(0, toFrame)
-      const kf = track.find((k) => k.frame === from)
-      if (!kf) return
-      if (clamped !== from) {
-        kf.frame = clamped
+      const fromFrame = kfRef.frame
+      if (clamped !== fromFrame) {
+        kfRef.frame = clamped
         track.sort((a, b) => a.frame - b.frame)
       }
       if (dw) {
-        kf.weight = Math.max(0, Math.min(1, kf.weight + dw))
+        kfRef.weight = Math.max(0, Math.min(1, kfRef.weight + dw))
       }
       setSelectedKeyframes((prev) =>
-        prev.map((s) => (s.morph === morph && s.frame === from ? { ...s, frame: clamped } : s)),
+        prev.map((s) => (s.morph === morph && s.frame === fromFrame ? { ...s, frame: clamped } : s)),
       )
       setClip((c) => (c ? { ...c, morphTracks: new Map(c.morphTracks) } : null))
       forceRedraw((n) => n + 1)
@@ -1332,7 +1398,32 @@ export const Timeline = memo(function Timeline({
           }}
         />
         <div className="mx-0.5 flex min-w-0 items-center gap-0.5 whitespace-nowrap rounded-md border border-border/50 bg-card px-1 py-px font-mono text-[9px] tabular-nums text-muted-foreground">
-          <span>F{padFrame4(currentFrame)}</span>
+          <span className="opacity-60">F</span>
+          <input
+            type="text"
+            inputMode="numeric"
+            aria-label="Current frame"
+            disabled={!clip}
+            value={frameDraft ?? padFrame4(currentFrame)}
+            onFocus={() => setFrameDraft(padFrame4(currentFrame))}
+            onChange={(e) => setFrameDraft(e.target.value)}
+            onBlur={() => {
+              const raw = frameDraft ?? ""
+              setFrameDraft(null)
+              const v = parseInt(raw.replace(/\s/g, ""), 10)
+              if (!Number.isFinite(v) || !clip) return
+              setPlaying(false)
+              setCurrentFrame(Math.max(0, Math.min(fc, v)))
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") (e.target as HTMLInputElement).blur()
+            }}
+            className={cn(
+              "h-4 w-8 min-w-0 rounded border border-transparent bg-transparent px-0.5 text-right text-[9px] tabular-nums outline-none",
+              "focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/30",
+              !clip && "pointer-events-none opacity-40",
+            )}
+          />
           <span className="opacity-40">/</span>
           <input
             type="text"
@@ -1353,7 +1444,7 @@ export const Timeline = memo(function Timeline({
               if (e.key === "Enter") (e.target as HTMLInputElement).blur()
             }}
             className={cn(
-              "h-4 w-[46px] min-w-0 rounded border border-transparent bg-transparent px-0.5 text-right text-[9px] tabular-nums outline-none",
+              "h-4 w-8 min-w-0 rounded border border-transparent bg-transparent px-0.5 text-right text-[9px] tabular-nums outline-none",
               "focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/30",
               !clip && "pointer-events-none opacity-40",
             )}
@@ -1395,7 +1486,10 @@ export const Timeline = memo(function Timeline({
           )
         })}
         <div className="min-w-0 flex-1" />
+        <span className="shrink-0 px-1 text-[10px] uppercase tracking-wide text-muted-foreground">Time</span>
         <ZoomRuler min={minPxPerFrame} max={MAX_PX} value={pxPerFrame} onChange={zoomTo} />
+        <span className="shrink-0 px-1 pl-2 text-[10px] uppercase tracking-wide text-muted-foreground">Value</span>
+        <ZoomRuler min={Y_ZOOM_MIN} max={Y_ZOOM_MAX} value={yZoom} onChange={setYZoom} />
       </div>
       {/* Canvas */}
       <div ref={timelineAreaRef} style={{ flex: 1, minHeight: 0 }} onWheel={onWheel}>
@@ -1403,6 +1497,7 @@ export const Timeline = memo(function Timeline({
           <TimelineCanvas
             clip={clip}
             pxPerFrame={pxPerFrame}
+            yZoom={yZoom}
             scrollX={scrollX}
             currentFrame={currentFrame}
             activeBone={activeBone}

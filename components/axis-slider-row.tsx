@@ -1,7 +1,7 @@
 "use client"
 
 import * as SliderPrimitive from "@radix-ui/react-slider"
-import { memo, useMemo } from "react"
+import { memo, useMemo, useState } from "react"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 
@@ -33,9 +33,12 @@ export const AxisSliderRow = memo(function AxisSliderRow({
 }: AxisSliderRowProps) {
   const step = useMemo(() => (decimals <= 2 ? 10 ** -decimals : 10 ** -4), [decimals])
   const pct = ((value - min) / (max - min)) * 100
+  // Keep a local draft string while the input is focused so intermediate
+  // values like "-", "3.", "-0.0" don't get reformatted away on each keystroke.
+  const [draft, setDraft] = useState<string | null>(null)
 
   return (
-    <div className={cn("mb-1.5 flex items-center gap-1.5", disabled && "opacity-50")}>
+    <div className={cn("mb-1.5 px-1 flex items-center gap-1.5", disabled && "opacity-50")}>
       <span className="w-3.5 shrink-0 text-[10px] font-semibold" style={{ color: color }}>
         {axis}
       </span>
@@ -71,12 +74,26 @@ export const AxisSliderRow = memo(function AxisSliderRow({
         type="text"
         inputMode="decimal"
         disabled={disabled}
-        className="h-7 w-[52px] rounded-md border border-input bg-muted px-1 py-0.5 text-right font-mono text-[10px] tabular-nums shadow-none md:text-[10px]"
+        className="h-5 w-13 rounded-sm border border-input bg-muted ml-2 px-1.5 py-0.5 text-right font-mono text-[10px] tabular-nums shadow-none md:text-[10px]"
         style={{ color }}
-        value={Number.isFinite(value) ? value.toFixed(decimals) : ""}
+        value={draft ?? (Number.isFinite(value) ? value.toFixed(decimals) : "")}
+        onFocus={(e) => {
+          setDraft(Number.isFinite(value) ? value.toFixed(decimals) : "")
+          e.currentTarget.select()
+        }}
         onChange={(e) => {
-          const x = parseFloat(e.target.value.replace(/,/g, "."))
+          const s = e.target.value
+          setDraft(s)
+          const x = parseFloat(s.replace(/,/g, "."))
           if (Number.isFinite(x)) onChange(clamp(x, min, max))
+        }}
+        onBlur={() => setDraft(null)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur()
+          if (e.key === "Escape") {
+            setDraft(null)
+            ;(e.currentTarget as HTMLInputElement).blur()
+          }
         }}
       />
     </div>

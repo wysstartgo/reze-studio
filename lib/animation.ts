@@ -377,7 +377,7 @@ export const ROT_CHANNELS: Channel[] = [
 export const TRA_CHANNELS: Channel[] = [
   {
     key: "tx",
-    label: "Tra.X",
+    label: "Trans.X",
     color: "#e2a055",
     group: "tra",
     get: (kf) => kf.translation.x,
@@ -387,7 +387,7 @@ export const TRA_CHANNELS: Channel[] = [
   },
   {
     key: "ty",
-    label: "Tra.Y",
+    label: "Trans.Y",
     color: "#55bba0",
     group: "tra",
     get: (kf) => kf.translation.y,
@@ -397,7 +397,7 @@ export const TRA_CHANNELS: Channel[] = [
   },
   {
     key: "tz",
-    label: "Tra.Z",
+    label: "Trans.Z",
     color: "#7755dd",
     group: "tra",
     get: (kf) => kf.translation.z,

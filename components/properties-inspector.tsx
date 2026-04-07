@@ -326,10 +326,10 @@ export const PropertiesInspector = memo(function PropertiesInspector({
           <div className="mb-1.5 flex flex-wrap gap-0.5">
             {(
               [
-                ["rot", "Rot"],
-                ["tx", "Tra X"],
-                ["ty", "Tra Y"],
-                ["tz", "Tra Z"],
+                ["rot", "Rotation"],
+                ["tx", "Trans X"],
+                ["ty", "Trans Y"],
+                ["tz", "Trans Z"],
               ] as const
             ).map(([key, label]) => (
               <Button

@@ -104,10 +104,10 @@ export const EditorLeftPanel = memo(function EditorLeftPanel({
   appVersion,
 }: EditorLeftPanelProps) {
   return (
-    <aside className="flex w-[225px] shrink-0 flex-col border-r border-border">
+    <aside className="flex w-56 shrink-0 flex-col border-r border-border">
       <div className="shrink-0 border-b">
         <div className="pl-2 pt-0 flex items-center justify-between pb-1">
-          <h1 className="scroll-m-20 max-w-[11rem] text-md font-extrabold leading-tight tracking-tight text-balance">
+          <h1 className="scroll-m-20 max-w-28 text-md font-extrabold leading-tight tracking-tight text-balance">
             REZE STUDIO
           </h1>
           <div className="flex shrink-0 items-center gap-0.5">
@@ -146,7 +146,7 @@ export const EditorLeftPanel = memo(function EditorLeftPanel({
               <MenubarTrigger className="h-4 rounded-sm px-1.5 py-0 text-xs font-normal text-muted-foreground">
                 File
               </MenubarTrigger>
-              <MenubarContent sideOffset={4} className="min-w-[10.5rem] p-0.5 text-xs">
+              <MenubarContent sideOffset={4} className="min-w-32 p-0.5 text-xs">
                 <MenubarGroup>
                   <MenubarItem
                     className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
@@ -193,7 +193,7 @@ export const EditorLeftPanel = memo(function EditorLeftPanel({
               <MenubarTrigger className="h-4 rounded-sm px-1.5 py-0 text-xs font-normal text-muted-foreground">
                 Help
               </MenubarTrigger>
-              <MenubarContent sideOffset={4} className="min-w-[11rem] p-0.5 text-xs">
+              <MenubarContent sideOffset={4} className="min-w-32 p-0.5 text-xs">
                 <MenubarGroup>
                   <MenubarItem className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground" asChild>
                     <Link href={docsReadmeUrl} target="_blank" rel="noreferrer">
@@ -224,7 +224,7 @@ export const EditorLeftPanel = memo(function EditorLeftPanel({
               <MenubarTrigger className="h-4 rounded-sm px-1.5 py-0 text-xs font-normal text-muted-foreground">
                 Settings
               </MenubarTrigger>
-              <MenubarContent sideOffset={4} className="min-w-[10rem] p-0.5 text-xs">
+              <MenubarContent sideOffset={4} className="min-w-32 p-0.5 text-xs">
                 <MenubarGroup>
                   <MenubarItem className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground" disabled>
                     Theme…
