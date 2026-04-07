@@ -2,6 +2,7 @@
 
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   useMemo,
@@ -736,8 +737,8 @@ function StudioPage() {
     }
   }, [commit, setClipDisplayName, setSelectedMorph])
 
-  // Keep model pose locked to timeline frame; refresh morph weight readout when a morph is selected.
-  useEffect(() => {
+  // Match timeline canvas: seek before paint so viewport and playhead don’t disagree for a frame.
+  useLayoutEffect(() => {
     const model = modelRef.current
     if (!model || !clip) return
     model.loadClip(STUDIO_ANIM_NAME, clip)

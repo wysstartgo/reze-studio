@@ -4,6 +4,7 @@ import {
   useState,
   useRef,
   useEffect,
+  useLayoutEffect,
   useCallback,
   useMemo,
 } from "react"
@@ -395,7 +396,6 @@ function TimelineCanvas({
   onMoveMorphKeyframe,
 }: TimelineCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const rafRef = useRef<number | null>(null)
   const sizeRef = useRef({ w: 0, h: 0, dpr: 0 })
   const drag = useRef<{
     type: string
@@ -819,18 +819,9 @@ function TimelineCanvas({
     }
   }, [clip, pxPerFrame, yZoom, scrollX, currentFrame, selectedBone, selectedMorph, visibleBones, selectedKeyframes, tab, getDopeFrames])
 
-  useEffect(() => {
-    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current)
-    rafRef.current = requestAnimationFrame(() => {
-      rafRef.current = null
-      draw()
-    })
-    return () => {
-      if (rafRef.current !== null) {
-        cancelAnimationFrame(rafRef.current)
-        rafRef.current = null
-      }
-    }
+  // Layout-phase paint: `useEffect`+nested rAF ran after browser paint → playhead lagged 1–2 frames behind transport.
+  useLayoutEffect(() => {
+    draw()
   }, [draw])
 
   useEffect(() => {
