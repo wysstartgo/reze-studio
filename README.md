@@ -20,12 +20,13 @@ A modern, web-native take on MMD animation editing — a dedicated timeline and 
 - [x] Morph list
 - [x] Rotation / translation sliders with direct numeric input
 - [x] Morph weight keyframing
+- [x] Undo / redo for clip edits
+- [x] Track operations: simplify (keyframe reduction), clear
 - [x] Keyboard shortcuts
 - [x] Unsaved-change warning on tab close / refresh
 - [ ] Animation layers with blend weights and bone masks
 - [ ] Custom bone groups with mute / solo toggle
 - [ ] Clip operations: cut, copy, paste, mirrored paste (左↔右), import, time stretch
-- [ ] Undo / redo
 - [ ] 3D transform gizmos in viewport
 - [ ] Mocap import (video → VMD)
 - [ ] Overleaf-style real-time collaboration
@@ -50,19 +51,23 @@ A typical workflow in Reze Studio:
 3. **Pose the bone.** Drag the rotation / translation sliders in the inspector, or type a number directly. If there's no keyframe on that bone at the current frame, one is inserted automatically; if there is, it's updated in place.
 4. **Shape the motion between keyframes.** Select a keyframe in the dopesheet and open the curve editor tab. Each channel (rotX, rotY, rotZ, tX, tY, tZ) has its own Bézier curve — drag the handles to change easing. This is where "stiff" animation becomes "alive."
 5. **Delete / nudge / drag keyframes.** In the dopesheet you can drag diamonds sideways to retime, or select and delete. Arrow keys nudge by one frame.
-6. **Repeat per bone** until the pose flows. Export to VMD.
+6. **Clean up a track.** In the Properties Inspector, `Simplify` removes redundant keyframes on the selected bone (keys that the Bézier between their neighbours already reproduces within a small rotation / translation tolerance). `Clear` wipes the track entirely. Both are undoable.
+7. **Undo mistakes.** `Ctrl/⌘+Z` rewinds the last clip edit; `Ctrl/⌘+Shift+Z` (or `⌘+Y`) redoes. History holds the last 100 edits. Loading a new VMD or PMX does _not_ go on the history stack — it would desync the loaded model.
+8. **Repeat per bone** until the pose flows. Export to VMD.
 
 ## Keyboard shortcuts
 
 | Key                              | Action                               |
 | -------------------------------- | ------------------------------------ |
-| `Space`                          | Play / pause                         |
-| `←` / `→`                        | Step one frame back / forward        |
-| `Home`                           | Jump to first frame                  |
-| `End`                            | Jump to last frame                   |
-| `←` / `→` _(in frame input)_     | Decrement / increment playhead frame |
-| `Shift` + mouse wheel            | Zoom the value / Y axis              |
-| `Ctrl` / `Command` + mouse wheel | Zoom the time / X axis               |
+| `Space`                              | Play / pause                         |
+| `←` / `→`                            | Step one frame back / forward        |
+| `Home`                               | Jump to first frame                  |
+| `End`                                | Jump to last frame                   |
+| `Ctrl` / `⌘` + `Z`                   | Undo last clip edit                  |
+| `Ctrl` / `⌘` + `Shift` + `Z`, `⌘`+`Y` | Redo                                 |
+| `←` / `→` _(in frame input)_         | Decrement / increment playhead frame |
+| `Shift` + mouse wheel                | Zoom the value / Y axis              |
+| `Ctrl` / `Command` + mouse wheel     | Zoom the time / X axis               |
 
 ## Tech stack
 
@@ -81,7 +86,7 @@ Beyond being an MMD editor, this repo is also a study in getting a timeline edit
 - **`useSyncExternalStore` + selector pattern.** Components subscribe to a single slice (`useStudioSelector(s => s.field)`) and re-render only when that slice changes. Action bags (`useStudioActions()`) are stable and never cause re-renders.
 - **Hot paths bypass React entirely.** Playback, keyframe drag, and pose slider drag all mutate refs/objects imperatively, repaint the canvas via an imperative handle, and touch React exactly once — on release.
 - **`currentFrameRef` escape hatch.** The playback store owns a ref that EngineBridge's rAF loop writes to directly. Non-subscribing consumers (inspector samplers, PMX swap snapshots) read the live playhead without triggering a re-render.
-- **Reducer-shaped core.** The stores wrap an internal `set()` so adding undo/redo is one hook, not a rewrite.
+- **Reducer-shaped core with snapshot-bridged undo.** Because preview-time edits mutate the live `clip` in place, the store also keeps an immutable `clipSnapshot` (a deep clone taken at the last commit/undo/redo). `commit()` pushes _that_ snapshot onto `past` — not the mutated `clip` — so history never captures mid-drag state.
 
 ### Provider tree
 
@@ -115,7 +120,7 @@ Beyond being an MMD editor, this repo is also a study in getting a timeline edit
 
 ### Subscription model
 
-`Studio` (document/selection), `Playback` (transport), and `StudioStatus` (chrome footer) are all external stores backed by `useSyncExternalStore`. Components read via `useStudioSelector(s => s.field)` / `usePlaybackSelector(...)` / `useStudioStatusSelector(...)` so each re-renders only on its own slice, and write via `use*Actions()` which return stable bags that never cause re-renders. Wrapping the store's internal `set()` is the single hook needed to add undo/redo — the reducer pattern is deliberate preparation for that.
+`Studio` (document/selection), `Playback` (transport), and `StudioStatus` (chrome footer) are all external stores backed by `useSyncExternalStore`. Components read via `useStudioSelector(s => s.field)` / `usePlaybackSelector(...)` / `useStudioStatusSelector(...)` so each re-renders only on its own slice, and write via `use*Actions()` which return stable bags that never cause re-renders. Wrapping the store's internal `set()` is also where undo/redo hooks in — `commit()` pushes onto `past`, `replaceClip()` (used by VMD/PMX loads and "New") clears history, and selection changes never touch the undo stack.
 
 ### Hot paths — zero React updates while interacting
 
@@ -124,7 +129,11 @@ The three high-frequency interactions (playback, keyframe drag, pose slider drag
 - **Playback** — `<EngineBridge>`'s rAF loop reads the engine clock, writes the live frame into the playback store's `currentFrameRef` (the single ref shared via `usePlaybackFrameRef()`), and calls `playheadDrawRef.current(frame)` — a handle `<TimelineCanvas>` exposes that repaints the playhead overlay directly. No `setCurrentFrame` per tick, so nothing re-renders, but any non-subscribing consumer (inspector pose sample, PMX swap snapshot) still sees the live frame via the ref. Auto-scroll (page-turn when the playhead leaves the viewport) lives in the same imperative path and only touches React at the rare page-turn boundary. On pause, the final frame is flushed to `setCurrentFrame` so the paused view matches what was last painted.
 - **Live pose / morph readout** — `<PropertiesInspector>` samples the selected bone's pose and morph weight in isolated leaf subcomponents. While paused it subscribes to `currentFrame` and re-samples on change; while playing it runs its own small rAF loop reading `modelRef.current`'s `runtimeSkeleton` / `getMorphWeights()` directly, gated by equality so unchanged frames don't reconcile. This keeps the per-frame work out of the parent inspector and out of `<StudioPage>` entirely.
 - **Keyframe drag** — `<Timeline>`'s move callbacks mutate `kf.frame` / channel values / track ordering **in place** and fire `dragRedrawRef.current()`, which bumps an internal drag version used by the static-layer cache invalidation check and redraws the canvas. `selectedKeyframes` entries are mutated in place so highlights follow the drag. On mouseup, a single `commit()` clones the track `Map`s → undo/redo snapshot + one `model.loadClip` via `<EngineBridge>`.
-- **Pose slider drag** — `<PropertiesInspector>`'s `apply*Axis` / `applyMorphWeight` functions run in `"preview"` mode per drag tick: mutate the matching keyframe (or insert one) in place, then `model.loadClip + seek` for the 3D viewport. No `commit()`, so Timeline stays static and the Inspector doesn't reconcile. `<AxisSliderRow>` keeps a local thumb value during the drag so Radix doesn't snap back to the stale controlled prop. On `onValueCommit`, a single clone + `commit()` fires.
+- **Pose slider drag** — `<PropertiesInspector>`'s `apply*Axis` / `applyMorphWeight` functions run in `"preview"` mode per drag tick: mutate the matching keyframe (or insert one) in place, then `model.loadClip + seek` for the 3D viewport. No `commit()`, so Timeline stays static and the Inspector doesn't reconcile. `<AxisSliderRow>` keeps a local thumb value during the drag so Radix doesn't snap back to the stale controlled prop. On `onValueCommit`, a single clone + `commit()` fires — and only that commit enters undo history, so a drag is one undoable unit rather than hundreds of preview frames.
+
+### Simplify track (keyframe reduction)
+
+MMD's interpolation model makes classic Ramer–Douglas–Peucker awkward: each frame stores a whole-row record, rotation is one quaternion governed by a single bezier (so rotX/rotY/rotZ share a segment, not independent curves), and translation has three independent per-axis beziers. Reze Studio's simplifier therefore works at the _keyframe_ level, not the channel level: for each candidate key it evaluates whether removing it leaves the reconstructed pose within `2.0°` of geodesic rotation error and `0.02` units of translation error against a dense pre-computed sample of the _original_ track (not the running simplified track — that would let drift compound into visible differences). The pass is iterative and greedy, re-sampling between the surviving neighbours each time. The whole operation lands as one `commit()`, so a simplification is one undo step.
 
 ### Where each piece lives
 
