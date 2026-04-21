@@ -67,11 +67,28 @@ type InterpolationCurveEditorProps = {
   onChange: (p1: CurvePoint, p2: CurvePoint) => void
 }
 
+/** Animation duration for prop-driven curve transitions (ms). Short enough to
+ *  feel snappy when crossing keyframe boundaries during playback, long enough
+ *  to read as motion rather than a jump. */
+const ANIM_MS = 220
+
+/** easeInOutQuad — standard smooth ease for UI transitions. */
+function ease(u: number) {
+  return u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2
+}
+
 /** VMD-style cubic Bézier editor in 127×127 space (same as reference HTML). */
 export const InterpolationCurveEditor = memo(function InterpolationCurveEditor({ p1, p2, disabled, onChange }: InterpolationCurveEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const dragging = useRef<"p1" | "p2" | null>(null)
   const [dpr, setDpr] = useState(1)
+
+  // Last points actually painted. Drives the animation start state when props
+  // change, and is updated every rAF tick during a transition so interrupting
+  // transitions (e.g. rapid keyframe crossings) can smoothly retarget from the
+  // current midpoint instead of the last committed target.
+  const displayedRef = useRef<{ p1: CurvePoint; p2: CurvePoint }>({ p1, p2 })
+  const animRef = useRef<number | null>(null)
 
   useEffect(() => {
     setDpr(typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1)
@@ -160,7 +177,10 @@ export const InterpolationCurveEditor = memo(function InterpolationCurveEditor({
         ctx.lineWidth = 1
         ctx.strokeRect(pt.x - CP_HALF, pt.y - CP_HALF, CP_RECT, CP_RECT)
 
-        const label = i === 0 ? `(${a.x}, ${a.y})` : `(${b.x}, ${b.y})`
+        const label =
+          i === 0
+            ? `(${Math.round(a.x)}, ${Math.round(a.y)})`
+            : `(${Math.round(b.x)}, ${Math.round(b.y)})`
         ctx.font = "9px -apple-system, sans-serif"
         ctx.textAlign = "center"
         ctx.textBaseline = "bottom"
@@ -169,13 +189,60 @@ export const InterpolationCurveEditor = memo(function InterpolationCurveEditor({
       })
   }, [dpr])
 
+  // Keep the backing store sized to DPR. Redraw-on-DPR-change is handled by
+  // the animation effect below — when DPR flips, `drawWith`'s identity changes
+  // and that effect re-runs.
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
     canvas.width = SIZE * dpr
     canvas.height = SIZE * dpr
-    drawWith(p1, p2)
-  }, [dpr, drawWith, p1, p2])
+  }, [dpr])
+
+  // Smooth transition to new p1/p2 whenever the props change. During an active
+  // drag, sync instantly — the pointer handlers paint directly, and tweening
+  // would fight the pointer position. If a transition is already in flight,
+  // restart from the currently-displayed midpoint so rapid playhead crossings
+  // ease continuously instead of snapping.
+  useEffect(() => {
+    if (dragging.current) {
+      displayedRef.current = { p1, p2 }
+      drawWith(p1, p2)
+      return
+    }
+    const start = {
+      p1: { ...displayedRef.current.p1 },
+      p2: { ...displayedRef.current.p2 },
+    }
+    const same =
+      start.p1.x === p1.x && start.p1.y === p1.y && start.p2.x === p2.x && start.p2.y === p2.y
+    if (same) {
+      drawWith(p1, p2)
+      return
+    }
+    if (animRef.current != null) cancelAnimationFrame(animRef.current)
+    const t0 = performance.now()
+    const step = () => {
+      const u = Math.min(1, (performance.now() - t0) / ANIM_MS)
+      const k = ease(u)
+      const cur1 = { x: start.p1.x + (p1.x - start.p1.x) * k, y: start.p1.y + (p1.y - start.p1.y) * k }
+      const cur2 = { x: start.p2.x + (p2.x - start.p2.x) * k, y: start.p2.y + (p2.y - start.p2.y) * k }
+      displayedRef.current = { p1: cur1, p2: cur2 }
+      drawWith(cur1, cur2)
+      if (u < 1) {
+        animRef.current = requestAnimationFrame(step)
+      } else {
+        animRef.current = null
+      }
+    }
+    animRef.current = requestAnimationFrame(step)
+    return () => {
+      if (animRef.current != null) {
+        cancelAnimationFrame(animRef.current)
+        animRef.current = null
+      }
+    }
+  }, [p1, p2, drawWith])
 
   const getMousePos = (e: React.MouseEvent | React.PointerEvent) => {
     const canvas = canvasRef.current

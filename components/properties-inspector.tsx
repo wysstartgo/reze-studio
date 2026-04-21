@@ -215,6 +215,54 @@ function useLivePose(
   return livePose
 }
 
+/** Returns the keyframe currently under the playhead (last key with frame ≤ f)
+ *  for the selected bone, live during playback. Mirrors useLivePose's split:
+ *  - Paused: resamples on `currentFrame` change.
+ *  - Playing: rAF loop reads straight from `playbackFrameRef`.
+ *
+ *  State updates are gated on keyframe *identity change* — within a single
+ *  segment the sampled keyframe is reference-stable, so we skip the setState
+ *  and avoid reconciling the section every rAF tick. The identity only flips
+ *  when the playhead crosses a keyframe boundary, which is what the
+ *  interpolation editor actually needs to redraw on. */
+function useLiveActiveKeyframe(
+  clip: AnimationClip | null,
+  selectedBone: string | null,
+): BoneKeyframe | null {
+  const playing = usePlaybackSelector((s) => s.playing)
+  const currentFrame = usePlaybackSelector((s) => s.currentFrame)
+  const playbackFrameRef = usePlaybackFrameRef()
+  const [kf, setKf] = useState<BoneKeyframe | null>(null)
+
+  const sample = useCallback((): BoneKeyframe | null => {
+    if (!clip || !selectedBone) return null
+    return sampleBoneKeyframe(clip, selectedBone, playbackFrameRef.current)
+  }, [clip, selectedBone, playbackFrameRef])
+
+  const apply = useCallback((next: BoneKeyframe | null) => {
+    setKf((prev) => (prev === next ? prev : next))
+  }, [])
+
+  // Paused path: resample on scrub / selection / clip edit.
+  useEffect(() => {
+    apply(sample())
+  }, [sample, currentFrame, apply])
+
+  // Playing path: rAF loop; no-op when the active key hasn't changed.
+  useEffect(() => {
+    if (!playing) return
+    let raf = 0
+    const tick = () => {
+      apply(sample())
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [playing, sample, apply])
+
+  return kf
+}
+
 /** Reads the selected morph's current weight live. Same playing/paused split
  *  as useLivePose so the morph slider tracks the playhead during playback. */
 function useLiveMorphWeight(
@@ -683,7 +731,6 @@ function InterpolationSection({
   commit: ReturnType<typeof useStudioActions>["commit"]
   clipVersion: number
 }) {
-  const currentFrame = usePlaybackSelector((s) => s.currentFrame)
   const [ipTab, setIpTab] = useState<IpTab>("rot")
 
   // Reset interpolation tab when a new clip is loaded.
@@ -694,7 +741,10 @@ function InterpolationSection({
     setIpTab("rot")
   }, [clipVersion])
 
-  const kfSample = clip && selectedBone ? sampleBoneKeyframe(clip, selectedBone, currentFrame) : null
+  // Live during playback: tracks the keyframe currently under the playhead
+  // (last key with frame ≤ f). Reconciles only when the active key flips, not
+  // every rAF tick — see `useLiveActiveKeyframe`.
+  const kfSample = useLiveActiveKeyframe(clip, selectedBone)
   const canEditIp = !!(clip && selectedBone && kfSample)
 
   // No useMemo: `patchKeyframeAt` mutates the keyframe in place and returns a
