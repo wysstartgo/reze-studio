@@ -45,6 +45,7 @@ import {
   DEFAULT_STUDIO_CLIP_FRAMES,
   interpolationTemplateForFrame,
   readLocalPoseAfterSeek,
+  simplifyBoneTrack,
   upsertMorphKeyframeAtFrame,
 } from "@/lib/utils"
 import packageJson from "../package.json"
@@ -369,7 +370,7 @@ export function StudioPage() {
   const selectedBone = useStudioSelector((s) => s.selectedBone)
   const selectedMorph = useStudioSelector((s) => s.selectedMorph)
   const selectedKeyframes = useStudioSelector((s) => s.selectedKeyframes)
-  const { commit, setClipDisplayName, setSelectedBone, setSelectedMorph, setSelectedKeyframes } =
+  const { commit, replaceClip, setClipDisplayName, setSelectedBone, setSelectedMorph, setSelectedKeyframes, undo, redo } =
     useStudioActions()
   const { currentFrame, setCurrentFrame, playing, setPlaying } = usePlayback()
   /** Single source of truth for the live playhead — the playback store owns
@@ -417,6 +418,18 @@ export function StudioPage() {
   const [pmxPickSelected, setPmxPickSelected] = useState("")
   /** Radix menubar: which submenu is open (`""` = all closed). */
   const [menubarValue, setMenubarValue] = useState("")
+  /** After the menu closes Radix returns focus to the MenubarTrigger, so a
+   *  stray Space (the user's play/pause reflex) re-opens the File menu or
+   *  re-activates "New". Drop focus once the menu is fully closed. */
+  const handleMenubarValueChange = useCallback((v: string) => {
+    setMenubarValue(v)
+    if (v === "") {
+      requestAnimationFrame(() => {
+        const el = document.activeElement as HTMLElement | null
+        if (el && typeof el.blur === "function") el.blur()
+      })
+    }
+  }, [])
   /** Status bar push actions — footer subscribes to its own store so these
    *  writes do not re-render the page. */
   const { setPmxFileName: setStatusPmxFileName } = useStudioStatusActions()
@@ -486,10 +499,19 @@ export function StudioPage() {
       if (e.code === "ArrowRight") setCurrentFrame((p) => Math.min(frameCount, Math.round(p) + 1))
       if (e.code === "Home") setCurrentFrame(0)
       if (e.code === "End") setCurrentFrame(frameCount)
+      // Undo / redo. Cmd on macOS, Ctrl elsewhere. Shift+Z (or Ctrl+Y) is redo.
+      if ((e.metaKey || e.ctrlKey) && (e.key === "z" || e.key === "Z")) {
+        e.preventDefault()
+        if (e.shiftKey) redo()
+        else undo()
+      } else if ((e.metaKey || e.ctrlKey) && (e.key === "y" || e.key === "Y")) {
+        e.preventDefault()
+        redo()
+      }
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [frameCount, setCurrentFrame, setPlaying])
+  }, [frameCount, setCurrentFrame, setPlaying, undo, redo])
 
   // ─── Bone selection handlers ─────────────────────────────────────────
   const handleSelectGroup = useCallback(
@@ -655,6 +677,27 @@ export function StudioPage() {
     setSelectedKeyframes([{ type: "curve", bone: selectedBone, frame, channel: "rx" }])
   }, [clip, selectedBone, selectedMorph, currentFrame, commit, setSelectedKeyframes])
 
+  const simplifySelectedBoneTrack = useCallback(() => {
+    if (!clip || !selectedBone) return
+    const prev = clip.boneTracks.get(selectedBone)
+    if (!prev || prev.length <= 2) return
+    const reduced = simplifyBoneTrack(prev)
+    if (reduced.length === prev.length) return
+    const boneTracks = new Map(clip.boneTracks)
+    boneTracks.set(selectedBone, reduced)
+    setSelectedKeyframes([])
+    commit({ ...clip, boneTracks })
+  }, [clip, selectedBone, commit, setSelectedKeyframes])
+
+  const clearSelectedBoneTrack = useCallback(() => {
+    if (!clip || !selectedBone) return
+    if (!clip.boneTracks.has(selectedBone)) return
+    const boneTracks = new Map(clip.boneTracks)
+    boneTracks.delete(selectedBone)
+    setSelectedKeyframes([])
+    commit({ ...clip, boneTracks })
+  }, [clip, selectedBone, commit, setSelectedKeyframes])
+
   const syncStudioAfterNewClip = useCallback(
     (model: Model) => {
       setCurrentFrame(0)
@@ -718,7 +761,7 @@ export function StudioPage() {
 
       model.loadClip(STUDIO_ANIM_NAME, nextClip)
       suppressClipDirtyRef.current += 1
-      commit(nextClip)
+      replaceClip(nextClip)
       // Retained motion is still only in memory until export — keep warning if tracks exist.
       documentDirtyRef.current = hasPrevTimeline
       setClipDisplayName(nextDisplay)
@@ -730,7 +773,7 @@ export function StudioPage() {
       else model.pause()
       setEngineError(null)
     },
-    [commit, setSelectedBone, setSelectedMorph, setSelectedKeyframes, setClipDisplayName, setCurrentFrame, setPlaying],
+    [replaceClip, setSelectedBone, setSelectedMorph, setSelectedKeyframes, setClipDisplayName, setCurrentFrame, setPlaying],
   )
 
   const loadPmxFromFolder = useCallback(
@@ -827,7 +870,7 @@ export function StudioPage() {
         const c = model.getClip(STUDIO_ANIM_NAME)
         if (c) {
           suppressClipDirtyRef.current += 1
-          commit(c)
+          replaceClip(c)
           documentDirtyRef.current = false
           setClipDisplayName(sanitizeClipFilenameBase(fileStem(file.name)))
           syncStudioAfterNewClip(model)
@@ -838,7 +881,7 @@ export function StudioPage() {
         URL.revokeObjectURL(url)
       }
     },
-    [syncStudioAfterNewClip, commit, setClipDisplayName],
+    [syncStudioAfterNewClip, replaceClip, setClipDisplayName],
   )
 
   const exportClipVmd = useCallback(() => {
@@ -861,7 +904,7 @@ export function StudioPage() {
     const fresh = emptyStudioClip()
     model.loadClip(STUDIO_ANIM_NAME, fresh)
     suppressClipDirtyRef.current += 1
-    commit(fresh)
+    replaceClip(fresh)
     documentDirtyRef.current = false
     setClipDisplayName("clip")
     setCurrentFrame(0)
@@ -873,7 +916,7 @@ export function StudioPage() {
     setClipVersion((v) => v + 1)
     model.show(STUDIO_ANIM_NAME)
     model.seek(0)
-  }, [commit, setClipDisplayName, setSelectedBone, setSelectedMorph, setSelectedKeyframes, setCurrentFrame, setPlaying])
+  }, [replaceClip, setClipDisplayName, setSelectedBone, setSelectedMorph, setSelectedKeyframes, setCurrentFrame, setPlaying])
 
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden text-foreground">
@@ -898,7 +941,7 @@ export function StudioPage() {
           onPickVmdFile={onPickVmdFile}
           onPickPmxFolder={onPickPmxFolder}
           menubarValue={menubarValue}
-          onMenubarValueChange={setMenubarValue}
+          onMenubarValueChange={handleMenubarValueChange}
           studioReady={studioReady}
           resetStudioDocument={resetStudioDocument}
           exportClipVmd={exportClipVmd}
@@ -941,6 +984,8 @@ export function StudioPage() {
               modelRef={modelRef}
               onInsertKeyframeAtPlayhead={insertKeyframeAtPlayhead}
               onDeleteSelectedKeyframes={deleteSelectedKeyframes}
+              onSimplifySelectedBoneTrack={simplifySelectedBoneTrack}
+              onClearSelectedBoneTrack={clearSelectedBoneTrack}
               timelineTab={timelineTab}
               setTimelineTab={setTimelineTab}
               clipVersion={clipVersion}

@@ -260,6 +260,8 @@ interface PropertiesInspectorProps {
   modelRef: RefObject<Model | null>
   onInsertKeyframeAtPlayhead: () => void
   onDeleteSelectedKeyframes: () => void
+  onSimplifySelectedBoneTrack: () => void
+  onClearSelectedBoneTrack: () => void
   timelineTab: string
   setTimelineTab: (tab: string) => void
   clipVersion: number
@@ -269,6 +271,8 @@ export const PropertiesInspector = memo(function PropertiesInspector({
   modelRef,
   onInsertKeyframeAtPlayhead,
   onDeleteSelectedKeyframes,
+  onSimplifySelectedBoneTrack,
+  onClearSelectedBoneTrack,
   timelineTab,
   setTimelineTab,
   clipVersion,
@@ -288,6 +292,9 @@ export const PropertiesInspector = memo(function PropertiesInspector({
 
   const canDelete = clip && singleSel !== null
   const canInsert = !!(clip && (selectedBone || selectedMorph))
+  const boneTrackLen = selectedBone && clip ? (clip.boneTracks.get(selectedBone)?.length ?? 0) : 0
+  const canSimplify = !!(clip && selectedBone && boneTrackLen > 2)
+  const canClear = !!(clip && selectedBone && boneTrackLen > 0)
 
   const showBoneStats = !!(selectedBone && clip && !selectedMorph && !multiSel)
 
@@ -488,27 +495,55 @@ export const PropertiesInspector = memo(function PropertiesInspector({
 
       <section className="space-y-2 pt-2.5">
         <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Operations</div>
-        <div className="flex flex-wrap gap-1.5">
-          <Button
-            type="button"
-            variant="secondary"
-            size="xs"
-            className="h-7 px-2 text-[11px]"
-            disabled={!canInsert}
-            onClick={onInsertKeyframeAtPlayhead}
-          >
-            Insert key
-          </Button>
-          <Button
-            type="button"
-            variant="secondary"
-            size="xs"
-            className="h-7 px-2 text-[11px]"
-            disabled={!canDelete}
-            onClick={onDeleteSelectedKeyframes}
-          >
-            Delete key
-          </Button>
+        <div className="space-y-2.5">
+          <div className="flex items-center gap-1.5">
+            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground/70">Key</span>
+            <Button
+              type="button"
+              variant="secondary"
+              size="xs"
+              className="h-6 flex-1 px-0.5 text-[11px]"
+              disabled={!canInsert}
+              onClick={onInsertKeyframeAtPlayhead}
+            >
+              Insert
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              size="xs"
+              className="h-6 flex-1 px-0.5 text-[11px]"
+              disabled={!canDelete}
+              onClick={onDeleteSelectedKeyframes}
+            >
+              Delete
+            </Button>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="w-10 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground/70">Track</span>
+            <Button
+              type="button"
+              variant="secondary"
+              size="xs"
+              className="h-6 flex-1 px-0.5 text-[11px]"
+              disabled={!canSimplify}
+              onClick={onSimplifySelectedBoneTrack}
+              title="Reduce redundant keyframes on the selected bone track"
+            >
+              Simplify
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              size="xs"
+              className="h-6 flex-1 px-0.5 text-[11px]"
+              disabled={!canClear}
+              onClick={onClearSelectedBoneTrack}
+              title="Remove all keyframes on the selected bone track"
+            >
+              Clear
+            </Button>
+          </div>
         </div>
       </section>
     </div>

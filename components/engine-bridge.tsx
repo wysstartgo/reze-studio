@@ -72,7 +72,7 @@ export function EngineBridge({
   setStudioReady,
 }: EngineBridgeProps) {
   const clip = useStudioSelector((s) => s.clip)
-  const { commit, setClipDisplayName, setSelectedMorph } = useStudioActions()
+  const { replaceClip, setClipDisplayName, setSelectedMorph } = useStudioActions()
   const { currentFrame, setCurrentFrame, playing, setPlaying } = usePlayback()
   const { setPmxFileName: setStatusPmxFileName, setFps: setStatusFps } = useStudioStatusActions()
   const frameCount = clip?.frameCount ?? 0
@@ -197,7 +197,7 @@ export function EngineBridge({
           const c = modelRef.current?.getClip(STUDIO_ANIM_NAME)
           if (c) {
             suppressClipDirtyRef.current += 1
-            commit(c)
+            replaceClip(c)
             documentDirtyRef.current = false
             setClipDisplayName(sanitizeClipFilenameBase(fileStem(VMD_PATH)))
             modelRef.current?.show(STUDIO_ANIM_NAME)

@@ -15,7 +15,9 @@ import {
   type SetStateAction,
 } from "react"
 import type { AnimationClip } from "reze-engine"
-import { clipAfterKeyframeEdit } from "@/lib/utils"
+import { clipAfterKeyframeEdit, cloneAnimationClip } from "@/lib/utils"
+
+const HISTORY_LIMIT = 100
 
 /** Dopesheet diamond vs curve-editor handle — shared by timeline hit-testing. */
 export interface SelectedKeyframe {
@@ -32,6 +34,12 @@ export type StudioState = {
   selectedBone: string | null
   selectedMorph: string | null
   selectedKeyframes: SelectedKeyframe[]
+  /** Immutable clone of `clip` taken at the last commit / undo / redo. Lets
+   *  us push a *clean* snapshot onto history even though slider preview
+   *  mutates `clip`'s keyframes in place between commits. */
+  clipSnapshot: AnimationClip | null
+  past: AnimationClip[]
+  future: AnimationClip[]
 }
 
 export type StudioClipCommit = Dispatch<SetStateAction<AnimationClip | null>>
@@ -39,10 +47,15 @@ export type StudioKeyframesSetter = Dispatch<SetStateAction<SelectedKeyframe[]>>
 
 export type StudioActions = {
   commit: StudioClipCommit
+  /** Load a clip without recording history — for VMD imports, PMX swaps,
+   *  document reset. Clears past/future. Editing actions go through `commit`. */
+  replaceClip: (next: AnimationClip | null) => void
   setClipDisplayName: (name: string) => void
   setSelectedBone: Dispatch<SetStateAction<string | null>>
   setSelectedMorph: Dispatch<SetStateAction<string | null>>
   setSelectedKeyframes: StudioKeyframesSetter
+  undo: () => void
+  redo: () => void
 }
 
 const INITIAL_STATE: StudioState = {
@@ -51,6 +64,9 @@ const INITIAL_STATE: StudioState = {
   selectedBone: null,
   selectedMorph: null,
   selectedKeyframes: [],
+  clipSnapshot: null,
+  past: [],
+  future: [],
 }
 
 /** Resolve a `SetStateAction<T>` against the current value. */
@@ -82,19 +98,93 @@ function createStudioStore(): StudioStore {
     set({ ...state, [key]: next })
   }
 
+  /** Append snapshot to `past`, capping at HISTORY_LIMIT (drop oldest). */
+  const pushPast = (past: AnimationClip[], snap: AnimationClip | null): AnimationClip[] => {
+    if (snap == null) return past
+    const next = past.length >= HISTORY_LIMIT ? past.slice(past.length - HISTORY_LIMIT + 1) : past.slice()
+    next.push(snap)
+    return next
+  }
+
   const actions: StudioActions = {
     commit: (payload) => {
       const next = resolve(payload, state.clip)
       if (next == null) {
-        set({ ...state, clip: null, selectedBone: null, selectedMorph: null, selectedKeyframes: [] })
-      } else {
-        set({ ...state, clip: clipAfterKeyframeEdit(next) })
+        set({
+          ...state,
+          clip: null,
+          clipSnapshot: null,
+          past: pushPast(state.past, state.clipSnapshot),
+          future: [],
+          selectedBone: null,
+          selectedMorph: null,
+          selectedKeyframes: [],
+        })
+        return
       }
+      const finalNext = clipAfterKeyframeEdit(next)
+      set({
+        ...state,
+        clip: finalNext,
+        clipSnapshot: cloneAnimationClip(finalNext),
+        past: pushPast(state.past, state.clipSnapshot),
+        future: [],
+      })
+    },
+    replaceClip: (next) => {
+      if (next == null) {
+        set({
+          ...state,
+          clip: null,
+          clipSnapshot: null,
+          past: [],
+          future: [],
+          selectedBone: null,
+          selectedMorph: null,
+          selectedKeyframes: [],
+        })
+        return
+      }
+      const finalNext = clipAfterKeyframeEdit(next)
+      set({
+        ...state,
+        clip: finalNext,
+        clipSnapshot: cloneAnimationClip(finalNext),
+        past: [],
+        future: [],
+      })
     },
     setClipDisplayName: (name) => update("clipDisplayName", name),
     setSelectedBone: (payload) => update("selectedBone", payload),
     setSelectedMorph: (payload) => update("selectedMorph", payload),
     setSelectedKeyframes: (payload) => update("selectedKeyframes", payload),
+    undo: () => {
+      if (state.past.length === 0) return
+      const popped = state.past[state.past.length - 1]
+      const past = state.past.slice(0, -1)
+      const future = state.clipSnapshot != null ? [state.clipSnapshot, ...state.future] : state.future
+      // popped is immutable; clone it so preview-time mutation can't poison history.
+      set({
+        ...state,
+        clip: cloneAnimationClip(popped),
+        clipSnapshot: popped,
+        past,
+        future,
+      })
+    },
+    redo: () => {
+      if (state.future.length === 0) return
+      const popped = state.future[0]
+      const future = state.future.slice(1)
+      const past = pushPast(state.past, state.clipSnapshot)
+      set({
+        ...state,
+        clip: cloneAnimationClip(popped),
+        clipSnapshot: popped,
+        past,
+        future,
+      })
+    },
   }
 
   return {
